@@ -80,26 +80,32 @@ export class CJClient {
       throw new Error(`CJ catalog request failed with ${response.status}`);
     }
 
-    const payload = (await response.json()) as { data?: Array<Record<string, unknown>> };
-    const records = Array.isArray(payload.data) ? payload.data : [];
+    const payload = (await response.json()) as {
+      data?: Array<Record<string, unknown>> | { list?: Array<Record<string, unknown>> };
+    };
+    const records = Array.isArray(payload.data)
+      ? payload.data
+      : Array.isArray(payload.data?.list)
+        ? payload.data.list
+        : [];
     return records.slice(0, limit).map((record, index) => ({
       id: String(record.pid || record.productId || `cj_${index}`),
-      variantId: String(record.vid || record.variantId || `cjv_${index}`),
+      variantId: String(record.vid || record.variantId || record.productSku || record.pid || `cjv_${index}`),
       title: String(record.productName || record.title || `CJ Item ${index + 1}`),
       normalizedKeyword: normalizeKeyword(String(record.productName || record.title || `CJ Item ${index + 1}`)),
-      categoryPath: String(record.categoryName || record.categoryPath || 'General'),
-      warehouseCountry: String(record.warehouseCountry || record.countryCode || 'US'),
+      categoryPath: String(record.categoryName || record.categoryPath || record.threeCategoryName || record.twoCategoryName || 'General'),
+      warehouseCountry: inferWarehouseCountry(record),
       landedCost: Number(record.sellPrice || record.cost || 0),
       shippingCost: Number(record.shippingFee || 0),
-      stock: Number(record.sellableQuantity || record.stock || 0),
-      estimatedDeliveryBusinessDays: Number(record.deliveryDays || record.deliveryTime || 7),
+      stock: inferStockLevel(record),
+      estimatedDeliveryBusinessDays: inferDeliveryDays(record),
       supplierName: String(record.supplierName || 'CJ Supplier'),
       supplierAgeDays: Number(record.supplierAgeDays || 180),
       shippingConsistency: Number(record.shippingConsistency || 80),
       stockStability: Number(record.stockStability || 80),
       orderHistoryScore: Number(record.orderHistoryScore || 80),
       imageUrl: String(record.image || record.productImage || ''),
-      tags: Array.isArray(record.tags) ? record.tags.map(String) : [],
+      tags: inferTags(record),
     }));
   }
 
@@ -147,6 +153,71 @@ export class CJClient {
     const payload = (await response.json()) as { data?: { orderId?: string } };
     return { cjOrderId: payload.data?.orderId || `CJ-${shortHash(params.idempotencyKey)}` };
   }
+}
+
+function inferWarehouseCountry(record: Record<string, unknown>): string {
+  const direct = String(record.warehouseCountry || record.countryCode || '').trim();
+  if (direct) {
+    return direct.toUpperCase();
+  }
+
+  const rawCodes = record.shippingCountryCodes;
+  const codes = Array.isArray(rawCodes)
+    ? rawCodes.map((value) => String(value).toUpperCase())
+    : typeof rawCodes === 'string'
+      ? rawCodes.split(/[,\s]+/).map((value) => value.trim().toUpperCase()).filter(Boolean)
+      : [];
+
+  if (codes.includes('US')) {
+    return 'US';
+  }
+  return codes[0] || 'US';
+}
+
+function inferStockLevel(record: Record<string, unknown>): number {
+  const explicit = Number(record.sellableQuantity || record.stock || 0);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+
+  const listed = Number(record.listedNum || record.listingCount || 0);
+  if (Number.isFinite(listed) && listed > 0) {
+    return Math.max(24, listed);
+  }
+
+  return 24;
+}
+
+function inferDeliveryDays(record: Record<string, unknown>): number {
+  const explicit = Number(record.deliveryDays || record.deliveryTime || 0);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+
+  return inferWarehouseCountry(record) === 'US' ? 5 : 8;
+}
+
+function inferTags(record: Record<string, unknown>): string[] {
+  if (Array.isArray(record.tags)) {
+    return record.tags.map(String);
+  }
+
+  const tags = new Set<string>();
+  const add = (value: unknown) => {
+    const text = String(value || '').trim().toLowerCase();
+    if (text) {
+      tags.add(text);
+    }
+  };
+
+  add(record.sourceFrom);
+  add(record.oneCategoryName);
+  add(record.twoCategoryName);
+  add(record.threeCategoryName);
+  add(record.productType);
+  add(record.isFreeShipping ? 'free-shipping' : '');
+
+  return Array.from(tags);
 }
 
 export class EbayClient {

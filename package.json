@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "discovery:once": "tsx scripts/discovery-once.ts",
     "dev:worker": "tsx worker.ts --once",
     "worker": "tsx worker.ts",
     "start": "tsx server.ts",

@@ -416,6 +416,44 @@ export function createDefaultState(config: RuntimeConfig): AppState {
   };
 }
 
+function normalizeState(raw: Partial<AppState> | undefined, config: RuntimeConfig): AppState {
+  const defaults = createDefaultState(config);
+  const snapshot = raw || {};
+
+  return {
+    ...defaults,
+    ...snapshot,
+    settings: { ...defaults.settings, ...(snapshot.settings || {}) },
+    budgets: { ...defaults.budgets, ...(snapshot.budgets || {}) },
+    ceoChat: {
+      ...defaults.ceoChat,
+      ...(snapshot.ceoChat || {}),
+      messages: Array.isArray(snapshot.ceoChat?.messages) ? snapshot.ceoChat.messages : defaults.ceoChat.messages,
+    },
+    connections: Array.isArray(snapshot.connections) ? snapshot.connections : defaults.connections,
+    prohibitedRules: Array.isArray(snapshot.prohibitedRules) ? snapshot.prohibitedRules : defaults.prohibitedRules,
+    veroBlocklist: Array.isArray(snapshot.veroBlocklist) ? snapshot.veroBlocklist : defaults.veroBlocklist,
+    candidates: Array.isArray(snapshot.candidates) ? snapshot.candidates : defaults.candidates,
+    listingDrafts: Array.isArray(snapshot.listingDrafts) ? snapshot.listingDrafts : defaults.listingDrafts,
+    orders: Array.isArray(snapshot.orders) ? snapshot.orders : defaults.orders,
+    fulfillmentJobs: Array.isArray(snapshot.fulfillmentJobs) ? snapshot.fulfillmentJobs : defaults.fulfillmentJobs,
+    deadLetters: Array.isArray(snapshot.deadLetters) ? snapshot.deadLetters : defaults.deadLetters,
+    alerts: Array.isArray(snapshot.alerts) ? snapshot.alerts : defaults.alerts,
+    supportThreads: Array.isArray(snapshot.supportThreads) ? snapshot.supportThreads : defaults.supportThreads,
+    supplierChats: Array.isArray(snapshot.supplierChats) ? snapshot.supplierChats : defaults.supplierChats,
+    customerChats: Array.isArray(snapshot.customerChats) ? snapshot.customerChats : defaults.customerChats,
+    importedListings: Array.isArray(snapshot.importedListings) ? snapshot.importedListings : defaults.importedListings,
+    importedOrders: Array.isArray(snapshot.importedOrders) ? snapshot.importedOrders : defaults.importedOrders,
+    agentDefinitions: Array.isArray(snapshot.agentDefinitions) && snapshot.agentDefinitions.length > 0 ? snapshot.agentDefinitions : defaults.agentDefinitions,
+    agentContracts: Array.isArray(snapshot.agentContracts) && snapshot.agentContracts.length > 0 ? snapshot.agentContracts : defaults.agentContracts,
+    agentExecutions: Array.isArray(snapshot.agentExecutions) ? snapshot.agentExecutions : defaults.agentExecutions,
+    validationRuns: Array.isArray(snapshot.validationRuns) ? snapshot.validationRuns : defaults.validationRuns,
+    agentRuns: Array.isArray(snapshot.agentRuns) ? snapshot.agentRuns : defaults.agentRuns,
+    auditLogs: Array.isArray(snapshot.auditLogs) ? snapshot.auditLogs : defaults.auditLogs,
+    aiCache: Array.isArray(snapshot.aiCache) ? snapshot.aiCache : defaults.aiCache,
+  };
+}
+
 export interface StoreAdapter {
   initialize(): Promise<void>;
   getState(): Promise<AppState>;
@@ -461,7 +499,7 @@ class FileStoreAdapter implements StoreAdapter {
 
   async getState(): Promise<AppState> {
     const raw = await this.readRaw();
-    return raw.snapshot;
+    return normalizeState(raw.snapshot, this.config);
   }
 
   async saveState(state: AppState): Promise<void> {
@@ -590,7 +628,7 @@ class PostgresStoreAdapter implements StoreAdapter {
 
   async getState(): Promise<AppState> {
     const result = await this.pool.query(`select payload from app_state_snapshot where key = $1`, [SNAPSHOT_KEY]);
-    return result.rows[0].payload as AppState;
+    return normalizeState(result.rows[0].payload as Partial<AppState>, this.config);
   }
 
   async saveState(state: AppState): Promise<void> {
