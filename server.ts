@@ -88,6 +88,19 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
+  app.get('/api/debug/env', (_req, res) => {
+    const config = loadConfig();
+    res.json({
+      NODE_ENV: process.env.NODE_ENV,
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY ? `${process.env.DEEPSEEK_API_KEY.substring(0, 5)}...${process.env.DEEPSEEK_API_KEY.substring(process.env.DEEPSEEK_API_KEY.length - 5)}` : 'NOT SET',
+      GEMINI_API_KEY: process.env.GEMINI_API_KEY ? `${process.env.GEMINI_API_KEY.substring(0, 5)}...${process.env.GEMINI_API_KEY.substring(process.env.GEMINI_API_KEY.length - 5)}` : 'NOT SET',
+      CJ_API_KEY: process.env.CJ_API_KEY ? `${process.env.CJ_API_KEY.substring(0, 5)}...${process.env.CJ_API_KEY.substring(process.env.CJ_API_KEY.length - 5)}` : 'NOT SET',
+      config_deepseek: config.ai.deepseekApiKey ? 'LOADED' : 'NOT LOADED',
+      config_gemini: config.ai.geminiApiKey ? 'LOADED' : 'NOT LOADED',
+      config_cj_token: config.cj.accessToken ? 'LOADED' : 'NOT LOADED',
+    });
+  });
+
   app.get('/api/dashboard', async (_req, res) => {
     res.json(await buildDashboard());
   });
