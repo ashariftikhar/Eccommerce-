@@ -88,13 +88,31 @@ function prefilterProduct(product: ProductCandidate | ReturnType<typeof convertP
   if (product.stock <= 20) {
     reasons.push('Stock is at or below 20 units.');
   }
-  if (product.estimatedDeliveryBusinessDays > 5) {
-    reasons.push('Delivery estimate above 5 business days.');
+  if (product.estimatedDeliveryBusinessDays > 7) {
+    reasons.push('Delivery estimate above 7 business days.');
   }
   if (blockedKeywords.length) {
     reasons.push(`Blocked keywords found: ${blockedKeywords.join(', ')}.`);
   }
   return reasons;
+}
+
+function buildOpenInCjUrl(product: { normalizedKeyword: string; cjProductId: string }): string {
+  const keyword = encodeURIComponent(product.normalizedKeyword || product.cjProductId);
+  return `https://app.cjdropshipping.com/product/list?keyword=${keyword}`;
+}
+
+function buildOpenInEbayUrl(sellerSku: string): string {
+  const query = encodeURIComponent(sellerSku);
+  return `https://www.ebay.com/sh/lst/active?keyword=${query}`;
+}
+
+function isSecondConfirmationRequired(state: AppState): boolean {
+  return Date.now() <= new Date(state.settings.approvalWindowEndsAt).getTime();
+}
+
+function canAutoPublishDraft(state: AppState, draft: ListingDraft): boolean {
+  return !isSecondConfirmationRequired(state) && state.settings.automationMode === 'AUTO_PUBLISH' && (draft.overallScore || 0) >= 85 && draft.validationStatus === 'passed' && draft.publishReady;
 }
 
 function convertProduct(product: Awaited<ReturnType<CJClient['fetchCatalog']>>[number]): ProductCandidate {
@@ -126,6 +144,8 @@ function convertProduct(product: Awaited<ReturnType<CJClient['fetchCatalog']>>[n
     searchSnapshot: null,
     scoreBreakdown: null,
     policyMatches: [],
+    rejectionReasons: [],
+    openInCjUrl: buildOpenInCjUrl({ normalizedKeyword: product.normalizedKeyword, cjProductId: product.id }),
     linkedExecutionIds: [],
     createdAt: nowIso(),
     updatedAt: nowIso(),
@@ -216,6 +236,7 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
   for (const [index, item] of shortlistWithReasons.entries()) {
     const candidate = item.candidate;
     candidate.policyMatches = item.reasons;
+    candidate.rejectionReasons = item.reasons;
     candidate.status = item.reasons.length > 0 ? 'BLOCKED' : 'DISCOVERED';
     candidate.riskClass = item.reasons.length > 0 ? 'high' : 'medium';
     candidate.updatedAt = nowIso();
@@ -298,6 +319,7 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
     candidate.searchSnapshot = snapshot;
     candidate.policyState = policy.state;
     candidate.policyMatches = policy.matches;
+    candidate.rejectionReasons = breakdown.hardRejectReasons.length > 0 ? breakdown.hardRejectReasons : policy.matches;
     candidate.scoreBreakdown = breakdown;
     candidate.status = breakdown.decision;
     candidate.targetPrice = breakdown.targetPrice;
@@ -332,7 +354,7 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
     if (
       drafted < remainingDraftBudget &&
       (candidate.status === 'READY_TO_LIST' || candidate.status === 'TEST_ONLY') &&
-      !state.listingDrafts.some((draft) => draft.candidateId === resolvedCandidate.id)
+      !state.listingDrafts.some((draft) => draft.candidateId === resolvedCandidate.id && draft.status !== 'rejected')
     ) {
       const generated = await services.ai.generateListingPack(state, candidate.sourceFingerprint, candidate);
       const categoryPolicies = await services.ebay.validateCategoryPolicies(candidate);
@@ -350,12 +372,18 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
         price: candidate.targetPrice,
         quantity: clamp(candidate.stock, 1, 25),
         warningMessages: [...candidate.policyMatches, ...categoryPolicies.warnings],
-        status: 'DRAFT_READY',
+        status: 'needs_review',
         approvalRequired: state.settings.automationMode !== 'AUTO_PUBLISH',
+        overallScore: candidate.scoreBreakdown?.totalScore ?? null,
+        validationStatus: 'warning',
+        publishReady: false,
         publishedAt: null,
         ebayInventoryItemId: null,
         ebayOfferId: null,
         offerCategoryId: categoryPolicies.categoryId,
+        historicalImport: false,
+        openInEbayUrl: buildOpenInEbayUrl(candidate.sellerSku),
+        openInCjUrl: candidate.openInCjUrl,
         linkedExecutionIds: [listingExec.id],
         createdAt: nowIso(),
         updatedAt: nowIso(),
@@ -364,14 +392,14 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
       if (categoryPolicies.valid) {
         state.listingDrafts.unshift(draft);
         drafted += 1;
-        pushValidationRun(
-          state,
-          validateListingGenerator(listingExec.id, draft, {
-            fallbackUsed: generated.fallback,
-            simulatedPolicy: !ebayIsReal,
-            categoryWarnings: categoryPolicies.warnings,
-          }),
-        );
+        const listingValidation = validateListingGenerator(listingExec.id, draft, {
+          fallbackUsed: generated.fallback,
+          simulatedPolicy: !ebayIsReal,
+          categoryWarnings: categoryPolicies.warnings,
+        });
+        draft.validationStatus = listingValidation.status;
+        draft.publishReady = listingValidation.status === 'passed' || listingValidation.status === 'warning';
+        pushValidationRun(state, listingValidation);
         pushExecutionStep(state, listingExec.id, {
           stepName: `Generate draft ${drafted}`,
           provider: generated.provider,
@@ -426,7 +454,7 @@ export async function approveDraft(services: PipelineServices, draftId: string, 
   if (!draft) {
     throw new Error('Draft not found.');
   }
-  if (draft.status === 'PUBLISHED' || draft.status === 'APPROVED' || draft.status === 'PUBLISHING') {
+  if (draft.status === 'published' || draft.status === 'ready_to_publish') {
     return draft;
   }
 
@@ -435,24 +463,45 @@ export async function approveDraft(services: PipelineServices, draftId: string, 
     linkedResourceId: draft.id,
     summary: `Owner approval requested for ${draft.sellerSku}.`,
   });
+  const revalidation = validateListingGenerator(exec.id, draft, {
+    fallbackUsed: draft.warningMessages.some((warning) => warning.toLowerCase().includes('template')),
+    simulatedPolicy: !Boolean(services.config.ebay.clientId || services.config.ebay.sandboxClientId),
+    categoryWarnings: draft.warningMessages,
+  });
+  pushValidationRun(state, revalidation);
+  draft.validationStatus = revalidation.status;
+  if (revalidation.status === 'failed') {
+    finishExecution(state, exec.id, 'failed', `Draft ${draft.sellerSku} failed revalidation before inventory draft creation.`);
+    await services.store.saveState(state);
+    throw new Error(`Draft ${draft.sellerSku} failed validation and cannot be queued for publish.`);
+  }
   pushExecutionStep(state, exec.id, {
-    stepName: 'Approve draft',
-    provider: 'system',
+    stepName: 'Create inventory draft',
+    provider: 'ebay',
     modelName: null,
-    requestPurpose: 'Move draft into the publish queue',
+    requestPurpose: 'Create or update an eBay inventory draft before any live publish',
     inputSummary: `Draft ${draft.sellerSku} in status ${draft.status}.`,
-    outputSummary: `Draft ${draft.sellerSku} marked APPROVED and publish job queued.`,
+    outputSummary: `Draft ${draft.sellerSku} moved to ready_to_publish after inventory draft creation.`,
     durationMs: 25,
     success: true,
     error: null,
   });
 
-  draft.status = 'APPROVED';
+  const inventory = await services.ebay.createOrReplaceInventoryItem({
+    sellerSku: draft.sellerSku,
+    title: draft.title,
+    description: draft.description,
+    images: draft.images,
+    quantity: draft.quantity,
+  });
+  draft.status = 'ready_to_publish';
+  draft.publishReady = true;
+  draft.ebayInventoryItemId = inventory.inventoryItemId;
+  draft.openInEbayUrl = buildOpenInEbayUrl(draft.sellerSku);
   draft.updatedAt = nowIso();
   addExecutionLink(draft, exec.id);
-  finishExecution(state, exec.id, 'completed', `Draft ${draft.sellerSku} approved.`);
-  pushAudit(state, 'listing.approved', `Draft ${draft.sellerSku} approved for publish queue.`, actor);
-  await services.store.enqueueJob('publish_listing', { draftId });
+  finishExecution(state, exec.id, 'completed', `Draft ${draft.sellerSku} is ready for live publish confirmation.`);
+  pushAudit(state, 'listing.approved', `Draft ${draft.sellerSku} moved to ready_to_publish after inventory draft creation.`, actor);
   await services.store.saveState(state);
   return draft;
 }
@@ -481,7 +530,8 @@ export async function rejectDraft(services: PipelineServices, draftId: string, a
     error: null,
   });
 
-  draft.status = 'REJECTED';
+  draft.status = 'rejected';
+  draft.publishReady = false;
   draft.updatedAt = nowIso();
   addExecutionLink(draft, exec.id);
   finishExecution(state, exec.id, 'completed', `Draft ${draft.sellerSku} rejected.`);
@@ -496,8 +546,11 @@ export async function publishDraftNow(services: PipelineServices, draftId: strin
   if (!draft) {
     throw new Error('Draft not found.');
   }
-  if (draft.status === 'PUBLISHED') {
+  if (draft.status === 'published') {
     return draft;
+  }
+  if (draft.status !== 'ready_to_publish') {
+    throw new Error('Draft must be ready_to_publish before live publish confirmation.');
   }
   if (state.settings.automationMode === 'PAUSED' || !state.settings.publishingEnabled) {
     throw new Error('Publishing is currently paused.');
@@ -508,28 +561,8 @@ export async function publishDraftNow(services: PipelineServices, draftId: strin
     linkedResourceId: draft.id,
     summary: `Publishing ${draft.sellerSku} to eBay.`,
   });
-  draft.status = 'PUBLISHING';
   draft.updatedAt = nowIso();
   addExecutionLink(draft, exec.id);
-
-  const inventory = await services.ebay.createOrReplaceInventoryItem({
-    sellerSku: draft.sellerSku,
-    title: draft.title,
-    description: draft.description,
-    images: draft.images,
-    quantity: draft.quantity,
-  });
-  pushExecutionStep(state, exec.id, {
-    stepName: 'Create or replace inventory item',
-    provider: 'ebay',
-    modelName: null,
-    requestPurpose: 'Prepare inventory state before offer publish',
-    inputSummary: `Seller SKU ${draft.sellerSku} / quantity ${draft.quantity}`,
-    outputSummary: `Inventory item ${inventory.inventoryItemId} created or replaced.`,
-    durationMs: 90,
-    success: true,
-    error: null,
-  });
 
   const offer = await services.ebay.publishOffer({
     sellerSku: draft.sellerSku,
@@ -548,17 +581,18 @@ export async function publishDraftNow(services: PipelineServices, draftId: strin
     error: null,
   });
 
-  draft.status = 'PUBLISHED';
+  draft.status = 'published';
   draft.publishedAt = offer.publishedAt;
-  draft.ebayInventoryItemId = inventory.inventoryItemId;
   draft.ebayOfferId = offer.offerId;
   draft.updatedAt = nowIso();
   const duplicateDetected =
-    state.listingDrafts.filter((item) => item.sellerSku === draft.sellerSku && item.id !== draft.id && item.status === 'PUBLISHED').length > 0;
+    state.listingDrafts.filter((item) => item.sellerSku === draft.sellerSku && item.id !== draft.id && item.status === 'published').length > 0;
   const publishValidation = validatePublish(exec.id, draft, !Boolean(services.config.ebay.clientId || services.config.ebay.sandboxClientId), duplicateDetected);
+  draft.validationStatus = publishValidation.status;
   pushValidationRun(state, publishValidation);
   if (publishValidation.status === 'failed') {
-    draft.status = 'FAILED';
+    draft.status = 'ready_to_publish';
+    draft.publishReady = false;
     finishExecution(state, exec.id, 'failed', `Publish validation failed for ${draft.sellerSku}.`);
     await services.store.saveState(state);
     throw new Error(`Publish validation failed for ${draft.sellerSku}`);
@@ -632,7 +666,7 @@ export async function activateKillSwitch(services: PipelineServices): Promise<vo
   state.settings.orderPushEnabled = false;
   state.settings.supportAutoSend = false;
 
-  const activeDrafts = state.listingDrafts.filter((draft) => draft.status === 'PUBLISHED' && draft.ebayOfferId);
+  const activeDrafts = state.listingDrafts.filter((draft) => draft.status === 'published' && draft.ebayOfferId);
   pushExecutionStep(state, exec.id, {
     stepName: 'Pause automation',
     provider: 'system',
@@ -723,6 +757,7 @@ export async function simulateSupplierFollowUp(services: PipelineServices, chatI
   if (!chat) {
     throw new Error('Supplier chat not found.');
   }
+  chat.notes.unshift({ id: createId('note'), body: ownerMessage, createdAt: nowIso() });
   chat.linkedExecutionIds = [...new Set([...(chat.linkedExecutionIds || []), exec.id])];
   pushExecutionStep(state, exec.id, {
     stepName: 'Send supplier follow-up',
@@ -1015,7 +1050,7 @@ export async function rerunValidationForExecution(services: PipelineServices, ex
     case 'ebay_publisher': {
       const draft = state.listingDrafts.find((item) => item.id === latest.resourceId);
       if (!draft) throw new Error('Draft not found.');
-      const duplicateDetected = state.listingDrafts.filter((item) => item.sellerSku === draft.sellerSku && item.id !== draft.id && item.status === 'PUBLISHED').length > 0;
+      const duplicateDetected = state.listingDrafts.filter((item) => item.sellerSku === draft.sellerSku && item.id !== draft.id && item.status === 'published').length > 0;
       pushValidationRun(state, validatePublish(executionId, draft, state.connections.find((item) => item.name === 'eBay')?.status !== 'connected', duplicateDetected));
       break;
     }

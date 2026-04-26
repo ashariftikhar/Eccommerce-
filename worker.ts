@@ -10,8 +10,8 @@ async function tick(workerId: string) {
   const lastDiscovery = state.settings.lastDiscoveryRunAt ? new Date(state.settings.lastDiscoveryRunAt).getTime() : 0;
   const shouldAutoDiscover =
     state.settings.automationMode !== 'PAUSED' &&
-    Date.now() - lastDiscovery > 24 * 60 * 60 * 1000 &&
-    !state.listingDrafts.some((draft) => draft.status === 'DRAFT_READY');
+    Date.now() - lastDiscovery > 6 * 60 * 60 * 1000 &&
+    !state.listingDrafts.some((draft) => draft.status === 'needs_review');
 
   if (shouldAutoDiscover) {
     await runDiscoveryCycle(services);

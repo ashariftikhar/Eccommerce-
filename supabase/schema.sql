@@ -37,10 +37,10 @@ create table if not exists candidate_scores (
   created_at timestamptz not null default now()
 );
 
-create table if not exists listing_drafts (
-  id text primary key,
-  candidate_id text not null references product_candidates(id) on delete cascade,
-  marketplace text not null,
+create table if not exists drafts (
+  id uuid primary key,
+  candidate_id uuid not null,
+  marketplace text not null default 'EBAY_US',
   seller_sku text not null,
   title text not null,
   subtitle text,
@@ -49,30 +49,37 @@ create table if not exists listing_drafts (
   item_specifics jsonb not null default '{}'::jsonb,
   images jsonb not null default '[]'::jsonb,
   price numeric(10, 2) not null,
-  quantity integer not null,
+  quantity integer not null default 1,
   warning_messages jsonb not null default '[]'::jsonb,
-  status text not null,
-  approval_required boolean not null,
-  published_at timestamptz,
+  status text not null check (status in ('needs_review', 'ready_to_publish', 'published', 'rejected')),
+  approval_required boolean not null default true,
+  overall_score numeric(5, 2),
+  validation_status text not null default 'warning',
+  publish_ready boolean not null default false,
   ebay_inventory_item_id text,
   ebay_offer_id text,
-  offer_category_id text not null,
+  offer_category_id text,
+  historical_import boolean not null default false,
+  open_in_ebay_url text,
+  open_in_cj_url text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 
-create index if not exists listing_drafts_status_created_idx
-  on listing_drafts (status, created_at desc);
+create unique index if not exists drafts_marketplace_sku_idx
+  on drafts (marketplace, seller_sku);
 
-create unique index if not exists listing_drafts_candidate_marketplace_open_idx
-  on listing_drafts (candidate_id, marketplace)
-  where status in ('DRAFT_READY', 'APPROVED', 'PUBLISHING', 'PUBLISHED');
+create index if not exists drafts_status_created_idx
+  on drafts (status, created_at desc);
+
+create index if not exists drafts_candidate_idx
+  on drafts (candidate_id);
 
 create table if not exists ebay_listings (
   id text primary key,
   marketplace text not null,
   seller_sku text not null,
-  draft_id text not null references listing_drafts(id) on delete cascade,
+  draft_id text not null,
   ebay_offer_id text,
   created_at timestamptz not null default now()
 );
@@ -83,7 +90,7 @@ create unique index if not exists ebay_listings_marketplace_sku_idx
 create table if not exists orders (
   id text primary key,
   ebay_order_id text not null unique,
-  draft_id text not null references listing_drafts(id) on delete cascade,
+  draft_id text not null,
   seller_sku text not null,
   buyer_user_id text not null,
   order_total_usd numeric(10, 2) not null,

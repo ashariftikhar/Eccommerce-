@@ -1,6 +1,6 @@
 export type AutomationMode = 'SANDBOX' | 'APPROVAL_REQUIRED' | 'AUTO_PUBLISH' | 'PAUSED';
 export type CandidateStatus = 'DISCOVERED' | 'IGNORED' | 'TEST_ONLY' | 'READY_TO_LIST' | 'BLOCKED';
-export type DraftStatus = 'DRAFT_READY' | 'APPROVED' | 'REJECTED' | 'PUBLISHING' | 'PUBLISHED' | 'FAILED' | 'ROLLED_BACK';
+export type DraftStatus = 'needs_review' | 'ready_to_publish' | 'published' | 'rejected';
 export type JobStatus = 'queued' | 'running' | 'retryable' | 'completed' | 'failed';
 export type JobType =
   | 'discovery'
@@ -145,6 +145,8 @@ export interface ProductCandidate {
   searchSnapshot: MarketSearchSnapshot | null;
   scoreBreakdown: ScoreBreakdown | null;
   policyMatches: string[];
+  rejectionReasons: string[];
+  openInCjUrl: string | null;
   linkedExecutionIds?: string[];
   linkedValidationIds?: string[];
   createdAt: string;
@@ -167,10 +169,16 @@ export interface ListingDraft {
   warningMessages: string[];
   status: DraftStatus;
   approvalRequired: boolean;
+  overallScore: number | null;
+  validationStatus: ValidationStatus;
+  publishReady: boolean;
   publishedAt: string | null;
   ebayInventoryItemId: string | null;
   ebayOfferId: string | null;
   offerCategoryId: string;
+  historicalImport: boolean;
+  openInEbayUrl: string | null;
+  openInCjUrl: string | null;
   linkedExecutionIds?: string[];
   linkedValidationIds?: string[];
   createdAt: string;
@@ -283,6 +291,8 @@ export interface SupplierConversation {
   lastMessage: string;
   lastMessageAt: string;
   responseEtaHours: number;
+  openInCjUrl: string | null;
+  notes: Array<{ id: string; body: string; createdAt: string }>;
   messages: ConversationMessage[];
   linkedExecutionIds?: string[];
   linkedValidationIds?: string[];
@@ -389,6 +399,8 @@ export interface ImportedCustomerConversation {
   matchedOrderId: string | null;
   linkedExecutionIds: string[];
   linkedValidationIds: string[];
+  openInEbayUrl: string | null;
+  autoSendEligible: boolean;
   messages: ConversationMessage[];
   createdAt: string;
   updatedAt: string;
@@ -417,9 +429,17 @@ export interface AgentStatusCard {
   stage: string;
   status: AgentStatus;
   currentTask: string;
+  decisionSummary: string;
+  inputSummary: string;
+  outputSummary: string;
+  nextAction: string;
+  nextScheduledRun: string;
   queueDepth: number;
   successRate: number;
   lastHeartbeatAt: string;
+  lastRunAt: string | null;
+  providerSummary: string;
+  validationStatus: ValidationStatus | 'not_run';
 }
 
 export interface StoreOverview {
@@ -555,6 +575,15 @@ export interface OverviewPayload {
   stats: DashboardPayload['stats'];
   alerts: SystemAlert[];
   storeOverview: StoreOverview[];
+  analytics: {
+    source: 'Free Traffic API';
+    available: boolean;
+    state: 'available' | 'waiting' | 'unavailable';
+    impressions: number | null;
+    clicks: number | null;
+    ctr: number | null;
+    note: string;
+  };
 }
 
 export interface AgentsPayload {
@@ -571,6 +600,7 @@ export interface StorePayload {
   storeOverview: StoreOverview[];
   settings: AutomationSettings;
   alerts: SystemAlert[];
+  analytics: OverviewPayload['analytics'];
   readinessChecklist: Array<{ id: string; label: string; done: boolean; note: string }>;
 }
 

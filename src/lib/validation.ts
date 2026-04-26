@@ -187,10 +187,11 @@ export function validateCjMatch(executionId: string, candidate: ProductCandidate
     validatorResults: [
       makeValidator('us-warehouse', 'US warehouse', 'hard', candidate.warehouseCountry === 'US', 'US warehouse', candidate.warehouseCountry),
       makeValidator('stock-threshold', 'Stock threshold', 'hard', candidate.stock > 20, 'Stock above 20', `${candidate.stock}`),
-      makeValidator('eta-threshold', 'ETA threshold', 'hard', candidate.estimatedDeliveryBusinessDays <= 5, 'ETA <= 5 business days', `${candidate.estimatedDeliveryBusinessDays} business days`),
+      makeValidator('eta-threshold', 'ETA threshold', 'hard', candidate.estimatedDeliveryBusinessDays <= 7, 'ETA <= 7 business days', `${candidate.estimatedDeliveryBusinessDays} business days`),
       makeValidator('landed-cost', 'Landed cost present', 'hard', candidate.landedCost > 0, 'Landed cost > 0', `${candidate.landedCost}`),
       makeValidator('supplier-identity', 'Supplier identity present', 'hard', Boolean(candidate.supplierName), 'Non-empty supplier name', candidate.supplierName || 'missing'),
       makeValidator('policy-block', 'Policy block clear', 'hard', candidate.policyState !== 'blocked', 'Policy state not blocked', candidate.policyState),
+      makeValidator('slow-delivery-penalty', 'Slow delivery penalty', 'soft', true, 'Delivery should stay within 5 business days for strong scoring', `${candidate.estimatedDeliveryBusinessDays} business days`, candidate.estimatedDeliveryBusinessDays > 5),
       makeValidator('simulated-supplier', 'Supplier data mode', 'soft', true, 'Real supplier data preferred', simulated ? 'Synthetic / cached supplier signals' : 'Real supplier data', simulated),
     ],
   });

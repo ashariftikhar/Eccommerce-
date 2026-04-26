@@ -140,7 +140,7 @@ async function runSyntheticSandbox(base: RuntimeConfig): Promise<AgentDiagnostic
     const discovery = await runDiscoveryCycle(services);
     let state = await services.store.getState();
 
-    const firstCandidate = state.candidates[0];
+    const firstCandidate = state.candidates.find((item) => Boolean(item.scoreBreakdown));
     const firstDraft = state.listingDrafts[0];
 
     addResult(results, {
@@ -197,9 +197,9 @@ async function runSyntheticSandbox(base: RuntimeConfig): Promise<AgentDiagnostic
       const published = await publishDraftNow(services, firstDraft.id);
       addResult(results, {
         agentId: 'ebay_publisher',
-        status: published.status === 'PUBLISHED' ? 'passed' : 'blocked',
+        status: published.status === 'published' ? 'passed' : 'blocked',
         mode: 'synthetic-sandbox',
-        summary: published.status === 'PUBLISHED' ? 'Draft published through simulated sandbox eBay flow.' : 'Publish did not complete.',
+        summary: published.status === 'published' ? 'Draft published through simulated sandbox eBay flow.' : 'Publish did not complete.',
         evidence: [
           `draft_status=${published.status}`,
           `inventory_item=${published.ebayInventoryItemId || 'missing'}`,

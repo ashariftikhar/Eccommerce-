@@ -29,6 +29,7 @@ import {
   enableApprovalPhase,
   initializeServices,
   nextRetryIso,
+  publishDraftNow,
   processJob,
   recordDeadLetter,
   rejectDraft,
@@ -53,8 +54,8 @@ function getState(): Promise<AppState> {
 
 function buildAgentFleet(state: AppState): AgentStatusCard[] {
   const now = new Date().toISOString();
-  const draftsWaiting = state.listingDrafts.filter((draft) => draft.status === 'DRAFT_READY').length;
-  const publishing = state.listingDrafts.filter((draft) => draft.status === 'APPROVED' || draft.status === 'PUBLISHING').length;
+  const draftsWaiting = state.listingDrafts.filter((draft) => draft.status === 'needs_review').length;
+  const publishing = state.listingDrafts.filter((draft) => draft.status === 'ready_to_publish').length;
   const blockedCandidates = state.candidates.filter((candidate) => candidate.status === 'BLOCKED').length;
   const lowRiskOrders = state.orders.filter((order) => order.fulfillmentStatus === 'QUEUED_FOR_PUSH').length;
   const supplierIssues = state.supplierChats.filter((chat) => chat.status === 'issue' || chat.status === 'awaiting_reply').length;
@@ -73,6 +74,17 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
     const failed = executions.filter((execution) => execution.status === 'failed').length;
     const successRate = completed + failed > 0 ? Math.round((completed / (completed + failed)) * 100) : 100;
     const latest = executions[0];
+    const latestStep = latest?.steps[latest.steps.length - 1] || null;
+    const latestValidation = latest?.validationRunIds.length
+      ? state.validationRuns.find((run) => run.id === latest.validationRunIds[0]) || null
+      : null;
+    const inputSummary = latestStep?.inputSummary || 'Waiting for the next scheduled run.';
+    const outputSummary = latestStep?.outputSummary || 'No output recorded yet.';
+    const providerSummary = latestStep ? `${latestStep.provider}${latestStep.modelName ? ` / ${latestStep.modelName}` : ''}` : 'system';
+    const lastRunAt = latest?.finishedAt || latest?.startedAt || null;
+    const discoveryNextRun = state.settings.lastDiscoveryRunAt
+      ? new Date(new Date(state.settings.lastDiscoveryRunAt).getTime() + 6 * 60 * 60 * 1000).toISOString()
+      : now;
 
     switch (definition.id) {
       case 'trend_discovery':
@@ -83,9 +95,17 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           stage: 'Discovery',
           status: paused ? 'idle' : 'running',
           currentTask: paused ? 'Paused by kill switch' : 'Scanning CJ inventory, normalizing keywords, and forming discovery candidates.',
+          decisionSummary: latest?.summary || 'Next run will rescan CJ for US-qualified products.',
+          inputSummary,
+          outputSummary,
+          nextAction: paused ? 'Resume automation to restart scanning.' : 'Scan the next CJ batch and pass survivors to supplier matching.',
+          nextScheduledRun: paused ? 'Paused' : new Date(discoveryNextRun).toLocaleString(),
           queueDepth: state.candidates.length,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || state.settings.lastDiscoveryRunAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       case 'cj_match':
         return {
@@ -95,9 +115,17 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           stage: 'Supplier Match',
           status: paused ? 'idle' : supplierIssues > 0 ? 'watching' : 'running',
           currentTask: supplierIssues > 0 ? `${supplierIssues} supplier threads are waiting on replies or issue resolution.` : 'Validating US-warehouse stock, cost, ETA, and supplier readiness.',
+          decisionSummary: latest?.summary || 'US-only hard gate and supplier checks are active.',
+          inputSummary,
+          outputSummary,
+          nextAction: supplierIssues > 0 ? 'Review supplier notes or open CJ for verification.' : 'Hand qualified candidates to scoring.',
+          nextScheduledRun: paused ? 'Paused' : new Date(discoveryNextRun).toLocaleString(),
           queueDepth: state.candidates.filter((candidate) => candidate.warehouseCountry === 'US').length,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || state.settings.lastDiscoveryRunAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       case 'product_scoring':
         return {
@@ -107,9 +135,17 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           stage: 'Scoring',
           status: paused ? 'idle' : blockedCandidates > 0 ? 'watching' : 'running',
           currentTask: blockedCandidates > 0 ? `${blockedCandidates} candidates are blocked or under policy review.` : 'Combining demand, margin, competition, and risk signals.',
+          decisionSummary: latest?.summary || 'Weighted scoring decides ready_to_list, test_only, or ignored.',
+          inputSummary,
+          outputSummary,
+          nextAction: blockedCandidates > 0 ? 'Inspect blocked reasons and adjust sourcing if needed.' : 'Promote score-qualified candidates into draft generation.',
+          nextScheduledRun: paused ? 'Paused' : new Date(discoveryNextRun).toLocaleString(),
           queueDepth: state.candidates.filter((candidate) => candidate.status === 'DISCOVERED').length,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || state.settings.lastDiscoveryRunAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       case 'listing_generator':
         return {
@@ -118,10 +154,18 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           role: definition.purpose,
           stage: 'Drafting',
           status: draftsWaiting > 0 ? 'running' : paused ? 'idle' : 'watching',
-          currentTask: draftsWaiting > 0 ? `${draftsWaiting} drafts are ready for review with provider-aware traces.` : 'Waiting for score-qualified products to generate listing packs.',
+          currentTask: draftsWaiting > 0 ? `${draftsWaiting} drafts need review before eBay inventory draft creation.` : 'Waiting for score-qualified products to generate listing packs.',
+          decisionSummary: latest?.summary || 'Create needs_review drafts with titles, price, specifics, and warnings.',
+          inputSummary,
+          outputSummary,
+          nextAction: draftsWaiting > 0 ? 'Review the Draft Queue and approve strong listings.' : 'Generate the next listing pack after scoring completes.',
+          nextScheduledRun: paused ? 'Paused' : 'After every scoring cycle',
           queueDepth: draftsWaiting,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || state.settings.lastDiscoveryRunAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       case 'ebay_publisher':
         return {
@@ -130,10 +174,18 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           role: definition.purpose,
           stage: 'Publish',
           status: paused ? 'blocked' : publishing > 0 ? 'running' : 'idle',
-          currentTask: paused ? 'Publishing is disabled until resume.' : publishing > 0 ? `Publishing or syncing ${publishing} draft(s).` : 'No approved drafts are queued right now.',
+          currentTask: paused ? 'Publishing is disabled until resume.' : publishing > 0 ? `${publishing} draft(s) are ready for live publish confirmation.` : 'No drafts are waiting for live publish confirmation.',
+          decisionSummary: latest?.summary || 'Approve & Queue Publish creates an eBay inventory draft only.',
+          inputSummary,
+          outputSummary,
+          nextAction: paused ? 'Resume guarded automation to allow publishing again.' : publishing > 0 ? 'Use Confirm Live Publish on ready drafts.' : 'Wait for reviewed drafts to be approved.',
+          nextScheduledRun: paused ? 'Paused' : 'On owner confirmation',
           queueDepth: publishing,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       case 'fulfillment':
         return {
@@ -143,9 +195,17 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           stage: 'Fulfillment',
           status: paused ? 'blocked' : lowRiskOrders > 0 ? 'running' : 'idle',
           currentTask: lowRiskOrders > 0 ? `Evaluating ${lowRiskOrders} order(s) for low-risk CJ auto-push.` : 'No low-risk orders are waiting right now.',
+          decisionSummary: latest?.summary || 'Only validated low-risk orders can auto-push to CJ.',
+          inputSummary,
+          outputSummary,
+          nextAction: paused ? 'Resume automation to restore low-risk order handling.' : 'Continue monitoring paid orders and validate low-risk rules.',
+          nextScheduledRun: paused ? 'Paused' : 'Continuous / every worker tick',
           queueDepth: lowRiskOrders,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || state.settings.lastOrderSyncAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       case 'customer_support':
         return {
@@ -155,9 +215,17 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           stage: 'Support',
           status: openSupport > 0 ? 'watching' : paused ? 'idle' : 'running',
           currentTask: openSupport > 0 ? `${openSupport} support thread(s) need follow-up or escalation.` : 'Watching for customer issues and message sentiment.',
+          decisionSummary: latest?.summary || 'Customer messages stay read-only except safe shipping-status updates.',
+          inputSummary,
+          outputSummary,
+          nextAction: 'Import messages, draft safe replies, and deep-link to eBay for manual handling.',
+          nextScheduledRun: paused ? 'Paused' : 'Continuous / every worker tick',
           queueDepth: openSupport,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       case 'supplier_liaison':
         return {
@@ -166,10 +234,18 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           role: definition.purpose,
           stage: 'Supplier Ops',
           status: supplierIssues > 0 ? 'watching' : 'running',
-          currentTask: supplierIssues > 0 ? `${supplierIssues} supplier conversation(s) need a follow-up.` : 'Monitoring supplier SLAs, stock commitments, and issue resolution.',
+          currentTask: supplierIssues > 0 ? `${supplierIssues} supplier note thread(s) need a follow-up.` : 'Maintaining internal supplier notes and CJ open-link verification.',
+          decisionSummary: latest?.summary || 'Supplier notes stay internal, with Open in CJ for direct verification.',
+          inputSummary,
+          outputSummary,
+          nextAction: supplierIssues > 0 ? 'Review notes and open the CJ thread in a new tab.' : 'Watch stock, SLA, and replacement notes.',
+          nextScheduledRun: 'Continuous / every worker tick',
           queueDepth: supplierIssues,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
       default:
         return {
@@ -179,20 +255,53 @@ function buildAgentFleet(state: AppState): AgentStatusCard[] {
           stage: 'Control',
           status: paused ? 'blocked' : 'running',
           currentTask: paused ? 'Kill switch active. Monitoring only.' : 'Watching budget, alerts, and state transitions across the system.',
+          decisionSummary: latest?.summary || 'Summarize blockers, why drafts are or are not being produced, and recommend next actions.',
+          inputSummary,
+          outputSummary,
+          nextAction: paused ? 'Explain what must be resumed or reviewed.' : 'Keep the CEO sidebar updated with the latest operational summary.',
+          nextScheduledRun: 'Continuous / every worker tick',
           queueDepth: state.alerts.filter((alert) => alert.status === 'open').length,
           successRate,
           lastHeartbeatAt: latest?.finishedAt || now,
+          lastRunAt,
+          providerSummary,
+          validationStatus: latestValidation?.status || 'not_run',
         };
     }
   });
+}
+
+function buildAnalytics(state: AppState): OverviewPayload['analytics'] {
+  const ebayConnected = state.connections.find((connection) => connection.name === 'eBay')?.status === 'connected';
+  if (!ebayConnected) {
+    return {
+      source: 'Free Traffic API',
+      available: false,
+      state: 'waiting',
+      impressions: null,
+      clicks: null,
+      ctr: null,
+      note: 'Waiting for eBay connection. Traffic API metrics will appear after seller OAuth is connected.',
+    };
+  }
+
+  return {
+    source: 'Free Traffic API',
+    available: false,
+    state: 'unavailable',
+    impressions: null,
+    clicks: null,
+    ctr: null,
+    note: 'Traffic API analytics are unavailable right now, so discovery and drafting continue without reach metrics.',
+  };
 }
 
 function buildStoreOverview(state: AppState): StoreOverview[] {
   const today = new Date().toISOString().slice(0, 10);
   const ordersToday = state.orders.filter((order) => order.createdAt.slice(0, 10) === today);
   const grossRevenueUsd = ordersToday.reduce((sum, order) => sum + order.orderTotalUsd, 0);
-  const publishedListings = state.listingDrafts.filter((draft) => draft.status === 'PUBLISHED').length;
-  const pendingApprovals = state.listingDrafts.filter((draft) => draft.status === 'DRAFT_READY').length;
+  const publishedListings = state.listingDrafts.filter((draft) => draft.status === 'published').length;
+  const pendingApprovals = state.listingDrafts.filter((draft) => draft.status === 'needs_review').length;
   const criticalAlerts = state.alerts.filter((alert) => alert.status === 'open' && alert.severity === 'critical').length;
   const riskState = state.settings.automationMode === 'PAUSED' || criticalAlerts > 0 ? 'risk' : pendingApprovals > 0 ? 'watch' : 'healthy';
   const ebayConnection = state.connections.find((connection) => connection.name === 'eBay');
@@ -235,8 +344,8 @@ function buildStoreOverview(state: AppState): StoreOverview[] {
 
 async function buildDashboard(): Promise<DashboardPayload> {
   const state = await getState();
-  const publishedListings = state.listingDrafts.filter((draft) => draft.status === 'PUBLISHED').length;
-  const pendingApprovals = state.listingDrafts.filter((draft) => draft.status === 'DRAFT_READY').length;
+  const publishedListings = state.listingDrafts.filter((draft) => draft.status === 'published').length;
+  const pendingApprovals = state.listingDrafts.filter((draft) => draft.status === 'needs_review').length;
   const readyToList = state.candidates.filter((candidate) => candidate.status === 'READY_TO_LIST').length;
   const openAlerts = state.alerts.filter((alert) => alert.status === 'open').length;
   const autoPushEligibleOrders = state.orders.filter((order) => order.fulfillmentStatus === 'QUEUED_FOR_PUSH').length;
@@ -278,6 +387,7 @@ async function buildOverviewPayload(): Promise<OverviewPayload> {
     stats: dashboard.stats,
     alerts: dashboard.alerts,
     storeOverview: dashboard.storeOverview,
+    analytics: buildAnalytics(await getState()),
   };
 }
 
@@ -296,12 +406,14 @@ async function buildStorePayload(): Promise<StorePayload> {
   const state = await getState();
   const ebayConnected = Boolean(loadConfig().ebay.clientId || loadConfig().ebay.sandboxClientId);
   const cjConnected = Boolean(loadConfig().cj.accessToken && loadConfig().cj.apiKey);
+  const analytics = buildAnalytics(state);
   return {
     generatedAt: new Date().toISOString(),
     connections: state.connections,
     storeOverview: buildStoreOverview(state),
     settings: state.settings,
     alerts: state.alerts.slice(0, 20),
+    analytics,
     readinessChecklist: [
       {
         id: 'ebay-oauth',
@@ -336,8 +448,8 @@ async function buildInventoryPayload(): Promise<InventoryPayload> {
   return {
     generatedAt: new Date().toISOString(),
     candidates: state.candidates,
-    drafts: state.listingDrafts.filter((draft) => draft.status !== 'PUBLISHED'),
-    published: state.listingDrafts.filter((draft) => draft.status === 'PUBLISHED'),
+    drafts: state.listingDrafts.filter((draft) => draft.status !== 'published'),
+    published: state.listingDrafts.filter((draft) => draft.status === 'published'),
     blocked: state.candidates.filter((candidate) => candidate.status === 'BLOCKED'),
     importedListings: state.importedListings,
   };
@@ -528,18 +640,8 @@ async function startServer() {
   }));
 
   app.post('/api/drafts/:draftId/publish', safe(async (req, res) => {
-    const store = createStoreAdapter(config);
-    const state = await store.getState();
-    state.settings.publishingEnabled = true;
-    const draft = state.listingDrafts.find((item) => item.id === req.params.draftId);
-    if (draft && draft.status !== 'PUBLISHED') {
-      draft.status = 'APPROVED';
-      draft.updatedAt = new Date().toISOString();
-      await store.enqueueJob('publish_listing', { draftId: draft.id });
-    }
-    await store.saveState(state);
-    const processed = await runWorkerTick();
-    res.json({ success: true, processedJobs: processed });
+    const draft = await publishDraftNow(services, req.params.draftId);
+    res.json({ success: true, draft });
   }));
 
   app.post('/api/suppliers/chats/:chatId/simulate-send', safe(async (req, res) => {

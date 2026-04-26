@@ -1,37 +1,29 @@
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import {
-  Activity,
   AlertTriangle,
-  BellRing,
   Bot,
-  Boxes,
   Brain,
-  CheckCircle2,
+  Boxes,
+  ChevronDown,
   ChevronRight,
   Clock3,
-  Cpu,
+  ExternalLink,
   Gauge,
-  Globe2,
   Layers3,
   MessageCircleMore,
-  MessageSquareCode,
   PackageCheck,
-  Rocket,
   ShieldAlert,
-  Siren,
   Store,
   Truck,
-  UserRoundCog,
   Warehouse,
 } from 'lucide-react';
-import {
+import type {
+  AgentStatusCard,
   ArchitecturePayload,
-  AgentsPayload,
   CeoChatPayload,
   CustomerChatsPayload,
-  DraftStatus,
   InventoryPayload,
-  OrdersPayload,
+  ListingDraft,
   OverviewPayload,
   ProductCandidate,
   StorePayload,
@@ -39,95 +31,100 @@ import {
   ValidationPayload,
 } from './types';
 
-type TabId = 'overview' | 'architecture' | 'validation' | 'agents' | 'store' | 'inventory' | 'orders' | 'suppliers' | 'customers' | 'ceo';
+type TabId = 'overview' | 'inventory' | 'agents' | 'store' | 'suppliers' | 'customers' | 'architecture' | 'validation';
 type BusyAction =
   | 'discovery'
-  | 'tick'
-  | 'approval-mode'
   | 'resume'
   | 'kill-switch'
+  | 'worker-tick'
   | `approve:${string}`
   | `reject:${string}`
   | `publish:${string}`
+  | `refine:${string}`
   | `supplier:${string}`
-  | `validation-rerun:${string}`
-  | `validation-refine:${string}`
   | 'ceo-send'
   | null;
 
 interface ConsoleData {
   overview: OverviewPayload;
-  architecture: ArchitecturePayload;
-  validation: ValidationPayload;
-  agents: AgentsPayload;
-  store: StorePayload;
   inventory: InventoryPayload;
-  orders: OrdersPayload;
+  agents: { generatedAt: string; fleet: AgentStatusCard[] };
+  store: StorePayload;
   suppliers: SupplierChatsPayload;
   customers: CustomerChatsPayload;
+  architecture: ArchitecturePayload;
+  validation: ValidationPayload;
   ceo: CeoChatPayload;
 }
 
 const tabs: Array<{ id: TabId; label: string; icon: ReactNode }> = [
   { id: 'overview', label: 'Overview', icon: <Gauge className="h-4 w-4" /> },
-  { id: 'architecture', label: 'Architecture', icon: <Layers3 className="h-4 w-4" /> },
-  { id: 'validation', label: 'Validation', icon: <ShieldAlert className="h-4 w-4" /> },
+  { id: 'inventory', label: 'Inventory', icon: <Boxes className="h-4 w-4" /> },
   { id: 'agents', label: 'Agents', icon: <Bot className="h-4 w-4" /> },
   { id: 'store', label: 'Store', icon: <Store className="h-4 w-4" /> },
-  { id: 'inventory', label: 'Inventory', icon: <Boxes className="h-4 w-4" /> },
-  { id: 'orders', label: 'Orders', icon: <Truck className="h-4 w-4" /> },
-  { id: 'suppliers', label: 'Supplier Chats', icon: <Warehouse className="h-4 w-4" /> },
-  { id: 'customers', label: 'Customer Chats', icon: <MessageCircleMore className="h-4 w-4" /> },
-  { id: 'ceo', label: 'CEO Chat', icon: <Brain className="h-4 w-4" /> },
+  { id: 'suppliers', label: 'Suppliers', icon: <Warehouse className="h-4 w-4" /> },
+  { id: 'customers', label: 'Customers', icon: <MessageCircleMore className="h-4 w-4" /> },
+  { id: 'architecture', label: 'Architecture', icon: <Layers3 className="h-4 w-4" /> },
+  { id: 'validation', label: 'Validation', icon: <ShieldAlert className="h-4 w-4" /> },
 ];
 
-const card = 'rounded-[2rem] border border-slate-200 bg-white/90 shadow-[0_20px_60px_rgba(15,23,42,0.06)]';
+const card = 'rounded-[1.75rem] border border-slate-200 bg-white shadow-[0_18px_60px_rgba(15,23,42,0.06)]';
 
-function money(value: number): string {
+function currency(value: number | null | undefined): string {
+  if (typeof value !== 'number') return '--';
   return `$${value.toFixed(2)}`;
+}
+
+function formatPct(value: number | null | undefined): string {
+  if (typeof value !== 'number') return '--';
+  return `${value.toFixed(1)}%`;
 }
 
 function tone(value: string): string {
   switch (value) {
-    case 'PAUSED':
-    case 'blocked':
-    case 'BLOCKED':
-    case 'critical':
-    case 'high':
-    case 'risk':
-    case 'failed':
-      return 'bg-rose-100 text-rose-700';
-    case 'AUTO_PUBLISH':
+    case 'published':
     case 'READY_TO_LIST':
     case 'connected':
-    case 'completed':
-    case 'healthy':
-    case 'online':
     case 'resolved':
+    case 'available':
+    case 'passed':
+    case 'healthy':
       return 'bg-emerald-100 text-emerald-700';
+    case 'ready_to_publish':
     case 'APPROVAL_REQUIRED':
     case 'TEST_ONLY':
     case 'warning':
-    case 'sandbox':
     case 'watch':
+    case 'sandbox':
     case 'awaiting_reply':
-    case 'medium':
     case 'running':
-      return 'bg-amber-100 text-amber-700';
+      return 'bg-amber-100 text-amber-800';
+    case 'blocked':
+    case 'BLOCKED':
+    case 'PAUSED':
+    case 'critical':
+    case 'rejected':
+    case 'failed':
+    case 'risk':
+    case 'unavailable':
+      return 'bg-rose-100 text-rose-700';
     default:
       return 'bg-slate-100 text-slate-700';
   }
 }
 
-function scoreTone(candidate: ProductCandidate): string {
-  const total = candidate.scoreBreakdown?.totalScore ?? 0;
-  if (total >= 85) return 'text-emerald-600';
-  if (total >= 70) return 'text-amber-600';
+function decisionTone(candidate: ProductCandidate): string {
+  const score = candidate.scoreBreakdown?.totalScore ?? 0;
+  if (score >= 85) return 'text-emerald-600';
+  if (score >= 70) return 'text-amber-600';
   return 'text-rose-600';
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${url}`);
+  }
   return (await response.json()) as T;
 }
 
@@ -137,55 +134,65 @@ export default function App() {
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
+  const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(null);
   const [selectedSupplierId, setSelectedSupplierId] = useState<string | null>(null);
   const [ceoPrompt, setCeoPrompt] = useState('');
-  const [selectedValidationExecutionId, setSelectedValidationExecutionId] = useState<string | null>(null);
 
   async function refreshAll() {
-    const [overview, architecture, validation, agents, store, inventory, orders, suppliers, customers, ceo] = await Promise.all([
+    const [overview, inventory, agents, store, suppliers, customers, architecture, validation, ceo] = await Promise.all([
       fetchJson<OverviewPayload>('/api/overview'),
-      fetchJson<ArchitecturePayload>('/api/architecture'),
-      fetchJson<ValidationPayload>('/api/validation'),
-      fetchJson<AgentsPayload>('/api/agents'),
-      fetchJson<StorePayload>('/api/store'),
       fetchJson<InventoryPayload>('/api/inventory'),
-      fetchJson<OrdersPayload>('/api/orders'),
+      fetchJson<{ generatedAt: string; fleet: AgentStatusCard[] }>('/api/agents'),
+      fetchJson<StorePayload>('/api/store'),
       fetchJson<SupplierChatsPayload>('/api/suppliers/chats'),
       fetchJson<CustomerChatsPayload>('/api/customer-chats'),
+      fetchJson<ArchitecturePayload>('/api/architecture'),
+      fetchJson<ValidationPayload>('/api/validation'),
       fetchJson<CeoChatPayload>('/api/ceo-chat'),
     ]);
-    setData({ overview, architecture, validation, agents, store, inventory, orders, suppliers, customers, ceo });
-    if (!selectedAgentId && agents.fleet[0]) {
-      setSelectedAgentId(agents.fleet[0].id);
-    }
-    if (!selectedSupplierId && suppliers.chats[0]) {
-      setSelectedSupplierId(suppliers.chats[0].id);
-    }
-    if (!selectedValidationExecutionId && validation.runs[0]) {
-      setSelectedValidationExecutionId(validation.runs[0].executionId);
-    }
+    setData({ overview, inventory, agents, store, suppliers, customers, architecture, validation, ceo });
+    if (!selectedCandidateId && inventory.candidates[0]) setSelectedCandidateId(inventory.candidates[0].id);
+    if (!selectedSupplierId && suppliers.chats[0]) setSelectedSupplierId(suppliers.chats[0].id);
+    if (!expandedAgentId && agents.fleet[0]) setExpandedAgentId(agents.fleet[0].id);
   }
 
   async function runAction(action: BusyAction, url: string, options?: RequestInit) {
     setBusyAction(action);
     setActionError(null);
+    setActionMessage(null);
     try {
-      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, ...options });
-      const payload = (await response.json().catch(() => ({}))) as { error?: string; summary?: { scanned?: number; shortlisted?: number; drafted?: number }; processedJobs?: number };
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        ...options,
+      });
+      const payload = (await response.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        summary?: { scanned?: number; shortlisted?: number; drafted?: number };
+      };
       if (!response.ok) {
         throw new Error(payload.error || 'Action failed.');
       }
       if (action === 'discovery' && payload.summary) {
-        setActionMessage(`Discovery ran: scanned ${payload.summary.scanned ?? 0}, shortlisted ${payload.summary.shortlisted ?? 0}, drafted ${payload.summary.drafted ?? 0}.`);
-      } else if (action === 'tick') {
-        setActionMessage(`Worker tick processed ${payload.processedJobs ?? 0} job(s).`);
+        setActionMessage(`Discovery complete: scanned ${payload.summary.scanned ?? 0}, shortlisted ${payload.summary.shortlisted ?? 0}, drafted ${payload.summary.drafted ?? 0}.`);
+      } else if (action?.startsWith('approve:')) {
+        setActionMessage('eBay inventory draft created. Use Confirm Live Publish to go live.');
+      } else if (action?.startsWith('publish:')) {
+        setActionMessage('Live publish confirmed.');
+      } else if (action?.startsWith('reject:')) {
+        setActionMessage('Draft rejected.');
+      } else if (action?.startsWith('refine:')) {
+        setActionMessage('Draft refinement requested.');
       } else if (action === 'resume') {
         setActionMessage('Automation resumed in approval-required mode.');
       } else if (action === 'kill-switch') {
-        setActionMessage('Kill switch engaged and rollback jobs were processed.');
+        setActionMessage('Kill switch engaged.');
+      } else if (action === 'ceo-send') {
+        setActionMessage('CEO chat updated.');
       } else {
-        setActionMessage('Action completed successfully.');
+        setActionMessage('Action completed.');
       }
       await refreshAll();
     } catch (error) {
@@ -203,774 +210,536 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
+  const selectedCandidate = useMemo(
+    () => data?.inventory.candidates.find((candidate) => candidate.id === selectedCandidateId) || data?.inventory.candidates[0] || null,
+    [data, selectedCandidateId],
+  );
+  const selectedSupplier = useMemo(
+    () => data?.suppliers.chats.find((chat) => chat.id === selectedSupplierId) || data?.suppliers.chats[0] || null,
+    [data, selectedSupplierId],
+  );
+
   if (!data) {
     return (
-      <div className="min-h-screen bg-[#eef4ff] text-slate-900 flex items-center justify-center">
-        <div className="flex items-center gap-4 rounded-[2rem] border border-slate-200 bg-white px-8 py-6 shadow-xl">
-          <Cpu className="h-8 w-8 animate-pulse text-blue-600" />
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">YuziGoods</p>
-            <h1 className="text-xl font-black text-slate-900">Loading Ops Console v3</h1>
-          </div>
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center text-slate-700">
+        <div className={`${card} px-8 py-6`}>
+          <p className="text-xs font-black uppercase tracking-[0.22em] text-slate-400">YuziGoods</p>
+          <h1 className="mt-2 text-2xl font-black text-slate-950">Loading Growth Console v4.2</h1>
         </div>
       </div>
     );
   }
 
-  const selectedAgent = data.agents.fleet.find((agent) => agent.id === selectedAgentId) || data.agents.fleet[0];
-  const selectedSupplier = data.suppliers.chats.find((chat) => chat.id === selectedSupplierId) || data.suppliers.chats[0];
-  const selectedExecutions = selectedAgent ? data.agents.executions.filter((execution) => execution.agentId === selectedAgent.id) : [];
-  const openAlerts = data.overview.alerts.filter((alert) => alert.status === 'open');
-  const candidates = data.inventory.candidates;
-  const draftCount = data.inventory.drafts.length;
-  const publishedCount = data.inventory.published.length;
-  const selectedValidationRuns = selectedValidationExecutionId
-    ? data.validation.runs.filter((run) => run.executionId === selectedValidationExecutionId)
-    : [];
+  const needsReview = data.inventory.drafts.filter((draft) => draft.status === 'needs_review');
+  const readyToPublish = data.inventory.drafts.filter((draft) => draft.status === 'ready_to_publish');
+  const published = data.inventory.published;
+  const rejected = data.inventory.drafts.filter((draft) => draft.status === 'rejected');
+  const hardGateSurvivors = data.inventory.candidates.filter((candidate) => candidate.status !== 'BLOCKED').length;
+  const ordersCount = data.store.storeOverview.reduce((sum, store) => sum + store.ordersToday, 0);
+  const impressions = data.overview.analytics.impressions;
+  const ctr = data.overview.analytics.ctr;
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#dbeafe_0%,_#eef4ff_38%,_#f8fafc_100%)] text-slate-900">
-      <div className="mx-auto max-w-[1580px] px-6 py-8 lg:px-10">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_#dbeafe_0%,_#eff6ff_35%,_#f8fafc_100%)] text-slate-900">
+      <div className="mx-auto max-w-[1680px] px-5 py-6 lg:px-8">
         <header className={`${card} overflow-hidden bg-slate-950 text-white`}>
-          <div className="grid gap-6 px-8 py-8 lg:grid-cols-[1.65fr_1fr] lg:px-10">
-            <div className="space-y-4">
-              <p className="text-xs font-black uppercase tracking-[0.35em] text-blue-300">YuziGoods / Ops Console v3</p>
-              <div className="space-y-2">
-                <h1 className="text-4xl font-black tracking-tight lg:text-5xl">Watch every agent work.</h1>
-                <p className="max-w-2xl text-sm font-medium text-slate-300 lg:text-base">
-                  Multi-tab operator cockpit for CJ discovery, scoring, listing generation, supplier coordination, readiness, and future eBay backfill.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-3">
-                <ActionButton onClick={() => runAction('discovery', '/api/discovery/run')} busy={busyAction !== null} primary>
+          <div className="grid gap-6 px-6 py-7 lg:grid-cols-[1.45fr_1fr]">
+            <div>
+              <p className="text-xs font-black uppercase tracking-[0.28em] text-blue-300">YuziGoods / Growth Console v4.2</p>
+              <h1 className="mt-3 text-4xl font-black tracking-tight">Find better products. Draft safer listings. See every decision.</h1>
+              <p className="mt-3 max-w-3xl text-sm text-slate-300">
+                Discovery is focused on US-warehouse winners with a 7-day hard shipping gate, strong score visibility, and a two-step eBay publish flow through May 10, 2026.
+              </p>
+              <div className="mt-5 flex flex-wrap gap-3">
+                <ActionButton busy={busyAction !== null} primary onClick={() => runAction('discovery', '/api/discovery/run')}>
                   Run Discovery
                 </ActionButton>
-                <ActionButton onClick={() => runAction('tick', '/api/worker/tick')} busy={busyAction !== null}>
+                <ActionButton busy={busyAction !== null} onClick={() => runAction('worker-tick', '/api/worker/tick')}>
                   Process Queue
                 </ActionButton>
-                <ActionButton onClick={() => runAction('approval-mode', '/api/system/mode/approval')} busy={busyAction !== null}>
-                  Enter Approval Mode
+                <ActionButton busy={busyAction !== null} onClick={() => runAction('resume', '/api/system/resume')}>
+                  Resume
+                </ActionButton>
+                <ActionButton busy={busyAction !== null} onClick={() => runAction('kill-switch', '/api/system/kill-switch')}>
+                  Kill Switch
                 </ActionButton>
               </div>
               {(actionMessage || actionError) && (
-                <div className={`rounded-2xl px-4 py-3 text-sm font-medium ${actionError ? 'bg-rose-500/15 text-rose-100' : 'bg-emerald-500/15 text-emerald-100'}`}>
+                <div className={`mt-4 rounded-2xl px-4 py-3 text-sm font-semibold ${actionError ? 'bg-rose-500/15 text-rose-100' : 'bg-emerald-500/15 text-emerald-100'}`}>
                   {actionError || actionMessage}
                 </div>
               )}
             </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <HeroStat label="Automation Mode" value={data.overview.settings.automationMode.replace(/_/g, ' ')} badgeTone={tone(data.overview.settings.automationMode)} />
-              <HeroCard label="Sandbox Window" value={new Date(data.overview.settings.sandboxEndsAt).toLocaleDateString()} note="Stay sandbox-first for one full week." />
-              <HeroCard
-                label="AI Budget"
-                value={`${money(data.overview.budgets.dayToDateUsd)} / ${money(data.overview.budgets.dailyCapUsd)}`}
-                note={`Monthly ${money(data.overview.budgets.monthToDateUsd)} / ${money(data.overview.budgets.monthlyCapUsd)}`}
-              />
-              <div className="rounded-[1.5rem] border border-white/10 bg-white/10 p-5 backdrop-blur">
-                <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-300">Emergency Control</p>
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => runAction('kill-switch', '/api/system/kill-switch')}
-                    disabled={busyAction !== null}
-                    className="flex-1 rounded-xl bg-rose-600 px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-white hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Kill Switch
-                  </button>
-                  <button
-                    onClick={() => runAction('resume', '/api/system/resume')}
-                    disabled={busyAction !== null}
-                    className="flex-1 rounded-xl border border-white/20 bg-transparent px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Resume
-                  </button>
-                </div>
-              </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <HeroBadge label="Automation Mode" value={data.overview.settings.automationMode.replace(/_/g, ' ')} toneClass={tone(data.overview.settings.automationMode)} />
+              <HeroBadge label="Traffic Source" value={data.overview.analytics.source} toneClass={tone(data.overview.analytics.state)} />
+              <HeroInfo label="Approval Window" value={new Date(data.overview.settings.approvalWindowEndsAt).toLocaleDateString()} note="Live publish still requires a second click until this date." />
+              <HeroInfo label="AI Budget" value={`${currency(data.overview.budgets.dayToDateUsd)} / ${currency(data.overview.budgets.dailyCapUsd)}`} note={`Monthly ${currency(data.overview.budgets.monthToDateUsd)} / ${currency(data.overview.budgets.monthlyCapUsd)}`} />
             </div>
           </div>
         </header>
 
-        <section className="mt-6 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
-          {[
-            { icon: Rocket, label: 'Candidates', value: data.overview.stats.totalCandidates, hint: `${data.overview.stats.readyToList} ready to list` },
-            { icon: PackageCheck, label: 'Drafts', value: draftCount, hint: `${publishedCount} published` },
-            { icon: BellRing, label: 'Open Alerts', value: data.overview.stats.openAlerts, hint: `${data.overview.stats.deadLetters} dead letters` },
-            { icon: Truck, label: 'Orders Eligible', value: data.overview.stats.autoPushEligibleOrders, hint: 'Low-risk only' },
-          ].map((stat) => (
-            <article key={stat.label} className={`${card} p-6`}>
-              <div className="flex items-center justify-between">
-                <div className="rounded-2xl bg-blue-50 p-3 text-blue-600">
-                  <stat.icon className="h-6 w-6" />
-                </div>
-                <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{stat.label}</p>
-              </div>
-              <div className="mt-5 flex items-end justify-between gap-3">
-                <h2 className="text-4xl font-black tracking-tight text-slate-950">{stat.value}</h2>
-                <p className="text-right text-xs font-semibold text-slate-500">{stat.hint}</p>
-              </div>
-            </article>
-          ))}
-        </section>
+        <nav className={`${card} mt-6 p-3`}>
+          <div className="flex flex-wrap gap-2">
+            {tabs.map((entry) => (
+              <button
+                key={entry.id}
+                onClick={() => setTab(entry.id)}
+                className={`flex items-center gap-2 rounded-2xl px-4 py-3 text-xs font-black uppercase tracking-[0.18em] transition ${
+                  tab === entry.id ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {entry.icon}
+                {entry.label}
+              </button>
+            ))}
+          </div>
+        </nav>
 
-        <section className="mt-6">
-          <div className={`${card} p-3`}>
-            <div className="flex flex-wrap gap-2">
-              {tabs.map((entry) => (
-                <button
-                  key={entry.id}
-                  onClick={() => setTab(entry.id)}
-                  className={`flex items-center gap-2 rounded-2xl px-4 py-3 text-xs font-black uppercase tracking-[0.18em] transition ${
-                    tab === entry.id ? 'bg-slate-950 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
+        {tab === 'overview' && (
+          <div className="mt-6 grid gap-6 xl:grid-cols-[1.45fr_0.55fr]">
+            <div className="space-y-6">
+              <section className="grid gap-4 md:grid-cols-4">
+                <KpiCard label="Candidates" value={data.inventory.candidates.length} note={`${hardGateSurvivors} passed hard gates`} />
+                <KpiCard label="Drafts" value={needsReview.length + readyToPublish.length} note={`${published.length} published`} />
+                <KpiCard label="Orders" value={ordersCount} note={`${data.inventory.candidates.filter((candidate) => candidate.status === 'BLOCKED').length} blocked`} />
+                <KpiCard
+                  label="CTR"
+                  value={ctr === null ? 'No analytics yet' : formatPct(ctr)}
+                  note={impressions === null ? data.overview.analytics.note : `${impressions} impressions`}
+                />
+              </section>
+
+              <section className={`${card} p-5`}>
+                <SectionHeader eyebrow="Row 2 / Draft Queue" title="One-Click Draft Workflow" icon={<PackageCheck className="h-5 w-5 text-slate-400" />} />
+                <div className="mt-5 grid gap-4 xl:grid-cols-4">
+                  <DraftColumn
+                    title="Needs Review"
+                    drafts={needsReview}
+                    inventory={data.inventory}
+                    busyAction={busyAction}
+                    onApprove={(draftId) => runAction(`approve:${draftId}`, `/api/drafts/${draftId}/approve`)}
+                    onReject={(draftId) => runAction(`reject:${draftId}`, `/api/drafts/${draftId}/reject`)}
+                    onRefine={(draft) => {
+                      const executionId = draft.linkedExecutionIds?.[0];
+                      if (executionId) {
+                        return runAction(`refine:${draft.id}`, `/api/validation/${executionId}/refine`);
+                      }
+                      return Promise.resolve();
+                    }}
+                  />
+                  <DraftColumn
+                    title="Ready to Publish"
+                    drafts={readyToPublish}
+                    inventory={data.inventory}
+                    busyAction={busyAction}
+                    onPublish={(draftId) => runAction(`publish:${draftId}`, `/api/drafts/${draftId}/publish`)}
+                  />
+                  <DraftColumn title="Published" drafts={published} inventory={data.inventory} busyAction={busyAction} />
+                  <DraftColumn title="Rejected" drafts={rejected} inventory={data.inventory} busyAction={busyAction} />
+                </div>
+              </section>
+
+              <section className={`${card} p-5`}>
+                <SectionHeader eyebrow="Row 3 / Agents" title="Agent Input, Output, Decision, and Next Run" icon={<Bot className="h-5 w-5 text-slate-400" />} />
+                <div className="mt-5 space-y-4">
+                  {data.agents.fleet.map((agent) => {
+                    const expanded = expandedAgentId === agent.id;
+                    return (
+                      <article key={agent.id} className="rounded-[1.5rem] border border-slate-200 bg-slate-50/80">
+                        <button
+                          onClick={() => setExpandedAgentId(expanded ? null : agent.id)}
+                          className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-lg font-black tracking-tight text-slate-950">{agent.name}</p>
+                              <Pill value={agent.status} />
+                              <Pill value={agent.validationStatus} />
+                            </div>
+                            <p className="mt-1 text-sm text-slate-500">{agent.decisionSummary}</p>
+                          </div>
+                          <div className="flex items-center gap-4 text-right">
+                            <div className="hidden text-xs text-slate-500 sm:block">
+                              <p>Last run: {agent.lastRunAt ? new Date(agent.lastRunAt).toLocaleString() : 'Never'}</p>
+                              <p>Next run: {agent.nextScheduledRun}</p>
+                            </div>
+                            {expanded ? <ChevronDown className="h-5 w-5 text-slate-400" /> : <ChevronRight className="h-5 w-5 text-slate-400" />}
+                          </div>
+                        </button>
+                        {expanded && (
+                          <div className="border-t border-slate-200 px-5 py-5">
+                            <div className="grid gap-4 lg:grid-cols-2">
+                              <InfoBlock label="Role" body={agent.role} />
+                              <InfoBlock label="Current Task" body={agent.currentTask} />
+                              <InfoBlock label="Input Summary" body={agent.inputSummary} />
+                              <InfoBlock label="Output Summary" body={agent.outputSummary} />
+                              <InfoBlock label="Next Action" body={agent.nextAction} />
+                              <InfoBlock label="Provider / Model" body={agent.providerSummary} />
+                            </div>
+                          </div>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            </div>
+
+            <aside className={`${card} p-5 xl:sticky xl:top-6 xl:h-fit`}>
+              <SectionHeader eyebrow="CEO Sidebar" title="Operational Summary" icon={<Brain className="h-5 w-5 text-slate-400" />} />
+              <div className="mt-5 space-y-3">
+                {data.ceo.thread.messages.slice(-8).map((message) => (
+                  <ChatBubble key={message.id} sender={message.sender} message={message.message} meta={`${message.provider || 'system'}${message.modelName ? ` / ${message.modelName}` : ''}`} />
+                ))}
+              </div>
+              <div className="mt-5 space-y-3">
+                <textarea
+                  value={ceoPrompt}
+                  onChange={(event) => setCeoPrompt(event.target.value)}
+                  rows={4}
+                  placeholder="Ask why no drafts were produced, what blocked discovery, or what to fix next."
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none focus:border-slate-400"
+                />
+                <ActionButton
+                  busy={busyAction !== null || !ceoPrompt.trim()}
+                  primary
+                  onClick={() => {
+                    if (!ceoPrompt.trim()) return;
+                    runAction('ceo-send', '/api/ceo-chat/messages', { body: JSON.stringify({ message: ceoPrompt }) }).catch((error) => console.error(error));
+                    setCeoPrompt('');
+                  }}
                 >
-                  {entry.icon}
-                  {entry.label}
-                </button>
+                  Ask CEO Agent
+                </ActionButton>
+              </div>
+            </aside>
+          </div>
+        )}
+
+        {tab === 'inventory' && (
+          <div className="mt-6 grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Candidates" title="Pass-Through by Stage" icon={<Boxes className="h-5 w-5 text-slate-400" />} />
+              <div className="mt-5 space-y-4">
+                <CandidateGroup
+                  title="High Priority"
+                  items={data.inventory.candidates.filter((candidate) => candidate.status === 'READY_TO_LIST')}
+                  selectedId={selectedCandidate?.id || null}
+                  onSelect={setSelectedCandidateId}
+                />
+                <CandidateGroup
+                  title="Test"
+                  items={data.inventory.candidates.filter((candidate) => candidate.status === 'TEST_ONLY')}
+                  selectedId={selectedCandidate?.id || null}
+                  onSelect={setSelectedCandidateId}
+                />
+                <CandidateGroup
+                  title="Blocked"
+                  items={data.inventory.candidates.filter((candidate) => candidate.status === 'BLOCKED' || candidate.status === 'IGNORED')}
+                  selectedId={selectedCandidate?.id || null}
+                  onSelect={setSelectedCandidateId}
+                />
+              </div>
+            </section>
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Candidate Detail" title={selectedCandidate?.title || 'Select a candidate'} icon={<AlertTriangle className="h-5 w-5 text-slate-400" />} />
+              {!selectedCandidate ? (
+                <EmptyState title="No candidate selected" body="Choose a candidate to see cost, price, demand, shipping ETA, policy risk, and rejection reasons." />
+              ) : (
+                <div className="mt-5">
+                  <div className="grid gap-5 lg:grid-cols-[220px_1fr]">
+                    <img src={selectedCandidate.imageUrl} alt={selectedCandidate.title} className="h-56 w-full rounded-[1.5rem] object-cover" />
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`text-3xl font-black ${decisionTone(selectedCandidate)}`}>{selectedCandidate.scoreBreakdown?.totalScore ?? '--'}</span>
+                        <Pill value={selectedCandidate.status} />
+                        <Pill value={selectedCandidate.policyState} />
+                      </div>
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        <Metric label="CJ Cost" value={currency(selectedCandidate.landedCost)} />
+                        <Metric label="Suggested Price" value={currency(selectedCandidate.targetPrice)} />
+                        <Metric label="Net Margin" value={formatPct(selectedCandidate.scoreBreakdown?.netMarginPercent)} />
+                        <Metric label="Demand Score" value={`${selectedCandidate.scoreBreakdown?.demandScore ?? '--'} / sold ${selectedCandidate.searchSnapshot?.sold30d ?? '--'}`} />
+                        <Metric label="Shipping ETA" value={`${selectedCandidate.estimatedDeliveryBusinessDays} business days`} />
+                        <Metric label="Competition Score" value={`${selectedCandidate.scoreBreakdown?.competitionScore ?? '--'}`} />
+                        <Metric label="Policy Risk" value={`${selectedCandidate.scoreBreakdown?.policyRiskScore ?? '--'}`} />
+                        <Metric label="Complexity" value={`${selectedCandidate.scoreBreakdown?.listingComplexityScore ?? '--'}`} />
+                        <Metric label="Decision" value={selectedCandidate.status.replace(/_/g, ' ')} />
+                      </div>
+                      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                        <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Rejection / Warning Reasons</p>
+                        <div className="mt-3 space-y-2 text-sm text-slate-700">
+                          {(selectedCandidate.rejectionReasons.length ? selectedCandidate.rejectionReasons : selectedCandidate.policyMatches).map((reason) => (
+                            <p key={reason}>- {reason}</p>
+                          ))}
+                          {!selectedCandidate.rejectionReasons.length && !selectedCandidate.policyMatches.length && <p>No rejection reasons. Candidate is eligible for scoring or drafting.</p>}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-3">
+                        {selectedCandidate.openInCjUrl && (
+                          <a href={selectedCandidate.openInCjUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-[0.18em] text-slate-700 hover:bg-slate-50">
+                            Open in CJ
+                            <ExternalLink className="h-4 w-4" />
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
+        {tab === 'agents' && (
+          <section className={`${card} mt-6 p-5`}>
+            <SectionHeader eyebrow="Agent Runtime" title="Last Run, Inputs, Outputs, Decisions, and Next Schedule" icon={<Bot className="h-5 w-5 text-slate-400" />} />
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              {data.agents.fleet.map((agent) => (
+                <div key={agent.id} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-lg font-black text-slate-950">{agent.name}</h3>
+                    <Pill value={agent.status} />
+                    <Pill value={agent.validationStatus} />
+                  </div>
+                  <p className="mt-2 text-sm text-slate-500">{agent.role}</p>
+                  <div className="mt-4 space-y-3">
+                    <MetricRow label="Last run" value={agent.lastRunAt ? new Date(agent.lastRunAt).toLocaleString() : 'Never'} />
+                    <MetricRow label="Input summary" value={agent.inputSummary} />
+                    <MetricRow label="Output summary" value={agent.outputSummary} />
+                    <MetricRow label="Decision" value={agent.decisionSummary} />
+                    <MetricRow label="Next action" value={agent.nextAction} />
+                    <MetricRow label="Next scheduled run" value={agent.nextScheduledRun} />
+                    <MetricRow label="Provider / model" value={agent.providerSummary} />
+                  </div>
+                </div>
               ))}
             </div>
+          </section>
+        )}
+
+        {tab === 'store' && (
+          <div className="mt-6 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Connections" title="Store and Platform Readiness" icon={<Store className="h-5 w-5 text-slate-400" />} />
+              <div className="mt-5 space-y-3">
+                {data.store.connections.map((connection) => (
+                  <div key={connection.name} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-bold text-slate-950">{connection.name}</p>
+                        <p className="mt-1 text-xs text-slate-500">{connection.notes}</p>
+                      </div>
+                      <Pill value={connection.status} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Traffic and Reach" title="Free Traffic API State" icon={<Truck className="h-5 w-5 text-slate-400" />} />
+              <div className="mt-5 rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Pill value={data.store.analytics.state} />
+                  <span className="text-sm font-semibold text-slate-500">{data.store.analytics.source}</span>
+                </div>
+                <p className="mt-3 text-sm text-slate-700">{data.store.analytics.note}</p>
+                <div className="mt-5 grid gap-3 md:grid-cols-3">
+                  <Metric label="Impressions" value={data.store.analytics.impressions === null ? '--' : `${data.store.analytics.impressions}`} />
+                  <Metric label="Clicks" value={data.store.analytics.clicks === null ? '--' : `${data.store.analytics.clicks}`} />
+                  <Metric label="CTR" value={data.store.analytics.ctr === null ? '--' : formatPct(data.store.analytics.ctr)} />
+                </div>
+              </div>
+              <div className="mt-5 space-y-3">
+                {data.store.readinessChecklist.map((item) => (
+                  <div key={item.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-bold text-slate-900">{item.label}</p>
+                      <Pill value={item.done ? 'passed' : 'warning'} />
+                    </div>
+                    <p className="mt-2 text-sm text-slate-500">{item.note}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
           </div>
-        </section>
+        )}
 
-        <section className="mt-6">
-          {tab === 'overview' && (
-            <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Condensed Health" title="System Status at a Glance" icon={<Activity className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 grid gap-4 md:grid-cols-2">
-                  {data.overview.storeOverview.map((store) => (
-                    <div key={store.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{store.platform}</p>
-                          <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{store.name}</h3>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(store.status)}`}>{store.status}</span>
+        {tab === 'suppliers' && (
+          <div className="mt-6 grid gap-6 xl:grid-cols-[0.7fr_1.3fr]">
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Supplier Notes" title="Internal Notes + Open in CJ" icon={<Warehouse className="h-5 w-5 text-slate-400" />} />
+              <div className="mt-5 space-y-3">
+                {data.suppliers.chats.map((chat) => (
+                  <button
+                    key={chat.id}
+                    onClick={() => setSelectedSupplierId(chat.id)}
+                    className={`w-full rounded-[1.5rem] border px-4 py-4 text-left transition ${
+                      selectedSupplier?.id === chat.id ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className={`text-xs font-black uppercase tracking-[0.18em] ${selectedSupplier?.id === chat.id ? 'text-blue-200' : 'text-slate-400'}`}>{chat.supplierRegion}</p>
+                        <h3 className="mt-1 text-lg font-black">{chat.supplierName}</h3>
+                        <p className={`mt-1 text-sm ${selectedSupplier?.id === chat.id ? 'text-slate-300' : 'text-slate-500'}`}>{chat.topic}</p>
                       </div>
-                      <div className="mt-4 grid grid-cols-3 gap-3 text-center">
-                        <MiniStat label="Listings" value={store.totalListings} />
-                        <MiniStat label="Pending" value={store.pendingApprovals} />
-                        <MiniStat label="Health" value={store.accountHealth} />
-                      </div>
-                      <p className="mt-4 text-sm text-slate-600">{store.note}</p>
+                      <Pill value={chat.status} inverted={selectedSupplier?.id === chat.id} />
                     </div>
-                  ))}
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Urgency" title="Alerts and Connection Readiness" icon={<AlertTriangle className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {data.overview.connections.map((connection) => (
-                    <div key={connection.name} className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-bold text-slate-900">{connection.name}</p>
-                          <p className="text-xs text-slate-500">{connection.notes}</p>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(connection.status)}`}>{connection.status}</span>
-                      </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Selected Supplier" title={selectedSupplier?.supplierName || 'Supplier'} icon={<MessageCircleMore className="h-5 w-5 text-slate-400" />} />
+              {!selectedSupplier ? (
+                <div className="mt-5"><EmptyState title="No supplier selected" body="Choose a supplier note thread to see product context, notes, and the CJ open link." /></div>
+              ) : (
+                <div className="mt-5 space-y-5">
+                  <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Pill value={selectedSupplier.status} />
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">{selectedSupplier.sellerSku}</span>
                     </div>
-                  ))}
-                  {openAlerts.length === 0 && <p className="text-sm text-slate-500">No open alerts right now.</p>}
-                  {openAlerts.map((alert) => (
-                    <div key={alert.id} className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-bold text-slate-900">{alert.message}</p>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(alert.severity)}`}>{alert.severity}</span>
-                      </div>
-                      <p className="mt-2 text-sm text-slate-500">{alert.context}</p>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
-          )}
-
-          {tab === 'architecture' && (
-            <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="System Map" title="Hybrid-Gated Multi-Agent Flow" icon={<Layers3 className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                  <pre className="overflow-x-auto whitespace-pre-wrap text-sm leading-6 text-slate-700">{data.architecture.flowchart}</pre>
-                </div>
-                <div className="mt-5 rounded-[1.75rem] border border-slate-200 bg-white p-5">
-                  <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Routing Rules</p>
-                  <div className="mt-3 space-y-2">
-                    {data.architecture.routingRules.map((rule) => (
-                      <p key={rule} className="text-sm text-slate-700">- {rule}</p>
-                    ))}
-                  </div>
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Contracts" title="Agent Roles, Inputs, Outputs, Guards" icon={<Bot className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {data.architecture.contracts.map((contract) => (
-                    <div key={contract.agentId} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{contract.agentId.replace(/_/g, ' ')}</p>
-                          <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{contract.role}</h3>
-                        </div>
-                        <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">
-                          {contract.handoffTargets.join(' -> ')}
-                        </span>
-                      </div>
-                      <div className="mt-4 grid gap-4 md:grid-cols-2">
-                        <ArchitectureList title="Inputs" items={contract.inputs} />
-                        <ArchitectureList title="Outputs" items={contract.outputs} />
-                        <ArchitectureList title="Hard Validators" items={contract.hardValidators} />
-                        <ArchitectureList title="Soft Validators" items={contract.softValidators} />
-                      </div>
-                      <div className="mt-4 grid gap-3">
-                        <ArchitectureNote label="Fallback" text={contract.fallbackBehavior} />
-                        <ArchitectureNote label="Refinement" text={contract.refinementBehavior} />
-                        <ArchitectureNote label="Blocking Failure" text={contract.blockingFailureBehavior} />
-                        <ArchitectureNote label="Optimization" text={contract.optimizationNotes.join(' | ')} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </article>
-
-              <article className={`${card} p-6 xl:col-span-2`}>
-                <SectionHeader eyebrow="Failure Matrix" title="How the System Handles Real-World Breaks" icon={<AlertTriangle className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                  {data.architecture.failureMatrix.map((item) => (
-                    <div key={item.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{item.stage}</p>
-                      <h3 className="mt-1 text-sm font-black uppercase tracking-[0.16em] text-slate-900">{item.failure}</h3>
-                      <p className="mt-3 text-sm text-slate-600">{item.handling}</p>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
-          )}
-
-          {tab === 'validation' && (
-            <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Validation Queue" title="Passed, Warnings, and Blocks" icon={<ShieldAlert className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 grid gap-4 md:grid-cols-3">
-                  <MiniStat label="Passed" value={data.validation.stats.passed} />
-                  <MiniStat label="Warnings" value={data.validation.stats.warnings} />
-                  <MiniStat label="Failed" value={data.validation.stats.failed} />
-                </div>
-                <div className="mt-4 grid gap-4 md:grid-cols-2">
-                  <MiniStat label="Fallback Runs" value={data.validation.stats.fallbackRuns} />
-                  <MiniStat label="Simulated Runs" value={data.validation.stats.simulatedRuns} />
-                </div>
-                <div className="mt-5 space-y-3">
-                  {data.validation.runs.map((run) => (
-                    <button
-                      key={run.id}
-                      onClick={() => setSelectedValidationExecutionId(run.executionId)}
-                      className={`w-full rounded-[1.75rem] border p-4 text-left transition ${
-                        selectedValidationExecutionId === run.executionId ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-slate-50/80 text-slate-900 hover:bg-slate-100'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className={`text-xs font-black uppercase tracking-[0.18em] ${selectedValidationExecutionId === run.executionId ? 'text-blue-200' : 'text-slate-400'}`}>
-                            {run.agentId.replace(/_/g, ' ')}
-                          </p>
-                          <h3 className="mt-1 text-sm font-black uppercase tracking-[0.16em]">{run.resourceType} / {run.resourceId}</h3>
-                          <p className={`mt-2 text-sm ${selectedValidationExecutionId === run.executionId ? 'text-slate-300' : 'text-slate-500'}`}>
-                            score {run.score} / refinement {run.refinementCount}
-                          </p>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${selectedValidationExecutionId === run.executionId ? 'bg-white/10 text-white' : tone(run.status)}`}>
-                          {run.status}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Validation Detail" title="Validator Results and Refinement Controls" icon={<CheckCircle2 className="h-5 w-5 text-slate-400" />} />
-                {selectedValidationRuns.length === 0 ? (
-                  <div className="mt-5"><EmptyState title="No validation selected" body="Pick a validation run from the left to inspect pass/fail reasons and refinement options." /></div>
-                ) : (
-                  <div className="mt-5 space-y-4">
-                    {selectedValidationRuns.map((run) => (
-                      <div key={run.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{run.agentId.replace(/_/g, ' ')}</p>
-                            <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{run.resourceType} / {run.resourceId}</h3>
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(run.status)}`}>{run.status}</span>
-                            {run.blocking && <span className="rounded-full bg-rose-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-rose-700">blocking</span>}
-                            {run.simulatedData && <span className="rounded-full bg-amber-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-amber-700">simulated</span>}
-                            {run.fallbackUsed && <span className="rounded-full bg-blue-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-blue-700">fallback</span>}
-                          </div>
-                        </div>
-                        <div className="mt-4 space-y-3">
-                          {run.validatorResults.map((result) => (
-                            <div key={result.validatorId} className="rounded-2xl bg-white p-4">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-sm font-bold text-slate-900">{result.name}</span>
-                                <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${tone(result.severity)}`}>{result.severity}</span>
-                                <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${tone(result.status)}`}>{result.status}</span>
-                              </div>
-                              <p className="mt-2 text-sm text-slate-600"><span className="font-bold text-slate-900">Expected:</span> {result.expected}</p>
-                              <p className="mt-1 text-sm text-slate-600"><span className="font-bold text-slate-900">Observed:</span> {result.observed}</p>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="mt-4 flex gap-3">
-                          <button
-                            onClick={() => runAction(`validation-rerun:${run.executionId}`, `/api/validation/${run.executionId}/rerun`)}
-                            disabled={busyAction !== null}
-                            className="rounded-2xl bg-slate-950 px-4 py-3 text-xs font-black uppercase tracking-[0.18em] text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            Rerun Validation
-                          </button>
-                          <button
-                            onClick={() => runAction(`validation-refine:${run.executionId}`, `/api/validation/${run.executionId}/refine`)}
-                            disabled={busyAction !== null}
-                            className="rounded-2xl bg-blue-600 px-4 py-3 text-xs font-black uppercase tracking-[0.18em] text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-                          >
-                            Refine Output
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </article>
-            </div>
-          )}
-
-          {tab === 'agents' && (
-            <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Fleet" title="Every Agent and Current Task" icon={<UserRoundCog className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-3">
-                  {data.agents.fleet.map((agent) => (
-                    <button
-                      key={agent.id}
-                      onClick={() => setSelectedAgentId(agent.id)}
-                      className={`w-full rounded-[1.75rem] border p-4 text-left transition ${
-                        selectedAgent?.id === agent.id ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-slate-50/80 text-slate-900 hover:bg-slate-100'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className={`text-xs font-black uppercase tracking-[0.18em] ${selectedAgent?.id === agent.id ? 'text-blue-200' : 'text-slate-400'}`}>{agent.stage}</p>
-                          <h3 className="mt-1 text-lg font-black tracking-tight">{agent.name}</h3>
-                          <p className={`mt-1 text-sm ${selectedAgent?.id === agent.id ? 'text-slate-300' : 'text-slate-500'}`}>{agent.role}</p>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${selectedAgent?.id === agent.id ? 'bg-white/10 text-white' : tone(agent.status)}`}>
-                          {agent.status}
-                        </span>
-                      </div>
-                      <p className={`mt-3 text-sm ${selectedAgent?.id === agent.id ? 'text-slate-200' : 'text-slate-600'}`}>{agent.currentTask}</p>
-                      <div className="mt-4 grid grid-cols-3 gap-3 text-center">
-                        <MiniStat label="Queue" value={agent.queueDepth} inverted={selectedAgent?.id === agent.id} />
-                        <MiniStat label="Success" value={`${agent.successRate}%`} inverted={selectedAgent?.id === agent.id} />
-                        <MiniStat
-                          label="Heartbeat"
-                          value={new Date(agent.lastHeartbeatAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          inverted={selectedAgent?.id === agent.id}
-                        />
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Trace" title={selectedAgent ? `${selectedAgent.name} Execution Trace` : 'Execution Trace'} icon={<MessageSquareCode className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {selectedExecutions.length === 0 && <EmptyState title="No executions yet" body="Run discovery or one of the queue actions to generate step-by-step traces." />}
-                  {selectedExecutions.map((execution) => (
-                    <div key={execution.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{execution.triggerSource}</p>
-                          <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{execution.summary || 'Execution trace'}</h3>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(execution.status)}`}>{execution.status}</span>
-                      </div>
-                      <div className="mt-4 space-y-3">
-                        {execution.steps.map((step) => (
-                          <div key={step.id} className="rounded-2xl bg-white p-4">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-sm font-black text-slate-900">{step.stepName}</span>
-                              <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${tone(step.provider)}`}>{step.provider}</span>
-                              {step.modelName && (
-                                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-700">{step.modelName}</span>
-                              )}
-                            </div>
-                            <p className="mt-2 text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">{step.requestPurpose}</p>
-                            <p className="mt-2 text-sm text-slate-600"><span className="font-bold text-slate-900">Input:</span> {step.inputSummary}</p>
-                            <p className="mt-1 text-sm text-slate-600"><span className="font-bold text-slate-900">Output:</span> {step.outputSummary}</p>
-                            {step.error && <p className="mt-1 text-sm text-rose-600">{step.error}</p>}
-                            <p className="mt-2 text-xs text-slate-500">{Math.round(step.durationMs)}ms / {new Date(step.createdAt).toLocaleString()}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
-          )}
-
-          {tab === 'store' && (
-            <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Readiness" title="Store and Platform Health" icon={<Globe2 className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {data.store.storeOverview.map((store) => (
-                    <div key={store.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{store.platform}</p>
-                          <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{store.name}</h3>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(store.status)}`}>{store.status}</span>
-                      </div>
-                      <div className="mt-4 grid grid-cols-3 gap-3 text-center">
-                        <MiniStat label="Listings" value={store.totalListings} />
-                        <MiniStat label="Orders Today" value={store.ordersToday} />
-                        <MiniStat label="Health" value={store.accountHealth} />
-                      </div>
-                      <p className="mt-4 text-sm text-slate-600">{store.note}</p>
-                    </div>
-                  ))}
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Checklist" title="What Still Needs To Be Connected" icon={<CheckCircle2 className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {data.store.readinessChecklist.map((item) => (
-                    <div key={item.id} className="rounded-[1.75rem] border border-slate-200 bg-white p-5">
-                      <div className="flex items-start gap-3">
-                        <div className={`mt-1 rounded-full p-2 ${item.done ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                          {item.done ? <CheckCircle2 className="h-4 w-4" /> : <Clock3 className="h-4 w-4" />}
-                        </div>
-                        <div>
-                          <h3 className="text-sm font-black uppercase tracking-[0.18em] text-slate-900">{item.label}</h3>
-                          <p className="mt-2 text-sm text-slate-600">{item.note}</p>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </article>
-            </div>
-          )}
-
-          {tab === 'inventory' && (
-            <div className="space-y-6">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Inventory Flow" title="Candidates, Drafts, Published, Blocked, Legacy" icon={<Layers3 className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 grid gap-6 xl:grid-cols-2">
-                  <InventoryPanel title="Candidates" items={candidates.length}>
-                    {candidates.slice(0, 8).map((candidate) => (
-                      <InventoryCard key={candidate.id} candidate={candidate} />
-                    ))}
-                  </InventoryPanel>
-                  <InventoryPanel title="Drafts" items={data.inventory.drafts.length}>
-                    {data.inventory.drafts.length === 0 && <EmptyState title="No drafts yet" body="Run discovery to create score-qualified draft listings." compact />}
-                    {data.inventory.drafts.slice(0, 8).map((draft) => {
-                      const candidate = candidates.find((item) => item.id === draft.candidateId);
-                      return <DraftInventoryCard key={draft.id} draftTitle={draft.title} sellerSku={draft.sellerSku} status={draft.status} candidate={candidate} />;
-                    })}
-                  </InventoryPanel>
-                  <InventoryPanel title="Published" items={data.inventory.published.length}>
-                    {data.inventory.published.length === 0 && <EmptyState title="Nothing published" body="Approved listings will appear here after sandbox/approval checks." compact />}
-                    {data.inventory.published.slice(0, 8).map((draft) => {
-                      const candidate = candidates.find((item) => item.id === draft.candidateId);
-                      return <DraftInventoryCard key={draft.id} draftTitle={draft.title} sellerSku={draft.sellerSku} status={draft.status} candidate={candidate} />;
-                    })}
-                  </InventoryPanel>
-                  <InventoryPanel title="Blocked / Policy Review" items={data.inventory.blocked.length}>
-                    {data.inventory.blocked.length === 0 && <EmptyState title="No blocked products" body="Blocked candidates and policy-review items will appear here." compact />}
-                    {data.inventory.blocked.slice(0, 8).map((candidate) => (
-                      <InventoryCard key={candidate.id} candidate={candidate} />
-                    ))}
-                  </InventoryPanel>
-                </div>
-                <div className="mt-6 rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Legacy Imported eBay Listings</p>
-                      <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">Ready for 90-Day Backfill</h3>
-                    </div>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">{data.inventory.importedListings.length} imported</span>
-                  </div>
-                  {data.inventory.importedListings.length === 0 ? (
-                    <p className="mt-4 text-sm text-slate-500">Once eBay credentials are connected, imported legacy listings will appear here and link to local seller SKUs where possible.</p>
-                  ) : (
-                    <div className="mt-4 space-y-3">
-                      {data.inventory.importedListings.map((item) => (
-                        <div key={item.id} className="rounded-2xl bg-white px-4 py-4">
-                          <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <p className="text-sm font-bold text-slate-900">{item.title}</p>
-                              <p className="text-xs text-slate-500">{item.sellerSku}</p>
-                            </div>
-                            <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(item.listingState)}`}>{item.listingState}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </article>
-            </div>
-          )}
-
-          {tab === 'orders' && (
-            <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Orders" title="Paid Orders and Fulfillment Queue" icon={<Truck className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {data.orders.orders.length === 0 && <EmptyState title="No local orders yet" body="As real or simulated orders enter the system, they will appear with their low-risk routing and trace links." />}
-                  {data.orders.orders.map((order) => (
-                    <div key={order.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{order.sellerSku}</p>
-                          <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{order.ebayOrderId}</h3>
-                          <p className="text-sm text-slate-500">{money(order.orderTotalUsd)} / qty {order.quantity}</p>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(order.fulfillmentStatus)}`}>{order.fulfillmentStatus.replace(/_/g, ' ')}</span>
-                      </div>
-                      <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-                        <MiniStat label="Risk" value={order.riskClass} />
-                        <MiniStat label="Country" value={order.destinationCountry} />
-                        <MiniStat label="Tracking" value={order.trackingNumber || '--'} />
-                        <MiniStat label="Execs" value={order.linkedExecutionIds?.length || 0} />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Fulfillment Detail" title="CJ Push Jobs and Imported History" icon={<PackageCheck className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {data.orders.fulfillmentJobs.length === 0 && <EmptyState title="No fulfillment jobs yet" body="Low-risk orders will create fulfillment jobs and idempotent CJ pushes here." />}
-                  {data.orders.fulfillmentJobs.map((job) => (
-                    <div key={job.id} className="rounded-[1.75rem] border border-slate-200 bg-white p-5">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-bold text-slate-900">{job.cjOrderId || 'Pending CJ placement'}</p>
-                          <p className="text-xs text-slate-500">Order {job.orderId}</p>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(job.status)}`}>{job.status}</span>
-                      </div>
-                    </div>
-                  ))}
-                  <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                    <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Imported 90-Day Order Backfill</p>
-                    {data.orders.importedOrders.length === 0 ? (
-                      <p className="mt-3 text-sm text-slate-500">Imported eBay orders will appear here once seller OAuth is connected.</p>
-                    ) : (
-                      <div className="mt-3 space-y-3">
-                        {data.orders.importedOrders.map((order) => (
-                          <div key={order.id} className="rounded-2xl bg-white px-4 py-4">
-                            <div className="flex items-center justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-bold text-slate-900">{order.ebayOrderId}</p>
-                                <p className="text-xs text-slate-500">{order.sellerSku}</p>
-                              </div>
-                              <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(order.state)}`}>{order.state}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                    <p className="mt-3 text-sm font-bold text-slate-900">{selectedSupplier.productTitle}</p>
+                    <p className="mt-1 text-sm text-slate-500">{selectedSupplier.topic}</p>
+                    {selectedSupplier.openInCjUrl && (
+                      <a href={selectedSupplier.openInCjUrl} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-[0.18em] text-slate-700 hover:bg-slate-50">
+                        Open in CJ
+                        <ExternalLink className="h-4 w-4" />
+                      </a>
                     )}
                   </div>
-                </div>
-              </article>
-            </div>
-          )}
-
-          {tab === 'suppliers' && (
-            <div className="grid gap-6 xl:grid-cols-[0.85fr_1.15fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Supplier Threads" title="CJ Supplier Conversation List" icon={<Warehouse className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-3">
-                  {data.suppliers.chats.map((chat) => (
-                    <button
-                      key={chat.id}
-                      onClick={() => setSelectedSupplierId(chat.id)}
-                      className={`w-full rounded-[1.75rem] border p-4 text-left transition ${
-                        selectedSupplier?.id === chat.id ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-slate-50/80 text-slate-900 hover:bg-slate-100'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className={`text-xs font-black uppercase tracking-[0.18em] ${selectedSupplier?.id === chat.id ? 'text-blue-200' : 'text-slate-400'}`}>{chat.supplierRegion}</p>
-                          <h3 className="mt-1 text-lg font-black tracking-tight">{chat.supplierName}</h3>
-                          <p className={`mt-1 text-sm ${selectedSupplier?.id === chat.id ? 'text-slate-300' : 'text-slate-500'}`}>{chat.topic}</p>
-                        </div>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${selectedSupplier?.id === chat.id ? 'bg-white/10 text-white' : tone(chat.status)}`}>
-                          {chat.status.replace(/_/g, ' ')}
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Thread View" title={selectedSupplier ? selectedSupplier.supplierName : 'Supplier Thread'} icon={<MessageCircleMore className="h-5 w-5 text-slate-400" />} />
-                {!selectedSupplier ? (
-                  <div className="mt-5"><EmptyState title="No supplier selected" body="Choose a supplier thread from the left to inspect its message flow." /></div>
-                ) : (
-                  <div className="mt-5 space-y-4">
-                    <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-blue-50 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-blue-700">{selectedSupplier.sellerSku}</span>
-                        <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(selectedSupplier.status)}`}>{selectedSupplier.status.replace(/_/g, ' ')}</span>
-                        <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">Reply ETA {selectedSupplier.responseEtaHours}h</span>
-                      </div>
-                      <p className="mt-4 text-sm font-semibold text-slate-800">{selectedSupplier.productTitle}</p>
-                      <p className="mt-1 text-sm text-slate-500">{selectedSupplier.topic}</p>
-                    </div>
-                    <div className="space-y-3">
-                      {selectedSupplier.messages.map((message) => (
-                        <ChatBubble
-                          key={message.id}
-                          sender={message.sender}
-                          message={message.message}
-                          provider={message.provider || null}
-                          modelName={message.modelName || null}
-                          createdAt={message.createdAt}
-                        />
-                      ))}
-                    </div>
-                    <div className="flex gap-3">
-                      <button
-                        onClick={() =>
-                          runAction(
-                            `supplier:${selectedSupplier.id}`,
-                            `/api/suppliers/chats/${selectedSupplier.id}/simulate-send`,
-                            { body: JSON.stringify({ message: 'Please reconfirm stock level, dispatch promise, and replacement handling for this SKU.' }) },
-                          )
-                        }
-                        disabled={busyAction !== null}
-                        className="rounded-2xl bg-blue-600 px-4 py-3 text-xs font-black uppercase tracking-[0.18em] text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        Simulate Follow-Up
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </article>
-            </div>
-          )}
-
-          {tab === 'customers' && (
-            <article className={`${card} p-6`}>
-              <SectionHeader eyebrow="Customer Messaging" title="Read-Only Until eBay Connects" icon={<MessageCircleMore className="h-5 w-5 text-slate-400" />} />
-              <div className="mt-5 space-y-4">
-                {!data.customers.connected && (
-                  <div className="rounded-[1.75rem] border border-amber-200 bg-amber-50 p-5">
-                    <p className="text-sm font-bold text-amber-900">Waiting for eBay connection</p>
-                    <p className="mt-2 text-sm text-amber-800">{data.customers.waitingReason}</p>
-                  </div>
-                )}
-                {data.customers.conversations.length === 0 ? (
-                  <EmptyState title="No customer conversations yet" body="After eBay credentials are connected, the console will import the last 90 days of buyer messages and keep message-send disabled until full messaging hooks are added." />
-                ) : (
-                  <div className="grid gap-4 xl:grid-cols-2">
-                    {data.customers.conversations.map((conversation) => (
-                      <div key={conversation.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                        <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{conversation.buyerUserId}</p>
-                        <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{conversation.subject}</h3>
-                        <p className="mt-2 text-sm text-slate-500">{conversation.messages.length} imported message(s)</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </article>
-          )}
-
-          {tab === 'ceo' && (
-            <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="CEO Chat" title="Manager Narrative and Control" icon={<Brain className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-3">
-                  {data.ceo.thread.messages.map((message) => (
-                    <ChatBubble
-                      key={message.id}
-                      sender={message.sender}
-                      message={message.message}
-                      provider={message.provider || null}
-                      modelName={message.modelName || null}
-                      createdAt={message.createdAt}
-                    />
-                  ))}
-                </div>
-                <div className="mt-5 flex gap-3">
-                  <input
-                    value={ceoPrompt}
-                    onChange={(event) => setCeoPrompt(event.target.value)}
-                    placeholder="Ask the Manager Agent what is happening right now..."
-                    className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none placeholder:text-slate-400 focus:border-slate-400"
-                  />
-                  <button
-                    onClick={() => {
-                      if (!ceoPrompt.trim()) return;
-                      runAction('ceo-send', '/api/ceo-chat/messages', { body: JSON.stringify({ message: ceoPrompt }) }).catch((error) => console.error(error));
-                      setCeoPrompt('');
-                    }}
-                    disabled={busyAction !== null || !ceoPrompt.trim()}
-                    className="rounded-2xl bg-slate-950 px-5 py-3 text-xs font-black uppercase tracking-[0.18em] text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Ask CEO Agent
-                  </button>
-                </div>
-              </article>
-
-              <article className={`${card} p-6`}>
-                <SectionHeader eyebrow="Linked Manager Traces" title="How the Manager Agent Is Thinking" icon={<ChevronRight className="h-5 w-5 text-slate-400" />} />
-                <div className="mt-5 space-y-4">
-                  {data.agents.executions
-                    .filter((execution) => execution.agentId === 'manager')
-                    .slice(0, 8)
-                    .map((execution) => (
-                      <div key={execution.id} className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{execution.triggerSource}</p>
-                            <h3 className="mt-1 text-lg font-black tracking-tight text-slate-950">{execution.summary}</h3>
+                  <div className="grid gap-5 lg:grid-cols-2">
+                    <div className="rounded-[1.5rem] border border-slate-200 bg-white p-5">
+                      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Internal Notes</p>
+                      <div className="mt-4 space-y-3">
+                        {selectedSupplier.notes.map((note) => (
+                          <div key={note.id} className="rounded-2xl bg-slate-50 p-4">
+                            <p className="text-sm text-slate-700">{note.body}</p>
+                            <p className="mt-2 text-xs text-slate-500">{new Date(note.createdAt).toLocaleString()}</p>
                           </div>
-                          <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${tone(execution.status)}`}>{execution.status}</span>
-                        </div>
-                        <div className="mt-4 space-y-3">
-                          {execution.steps.map((step) => (
-                            <div key={step.id} className="rounded-2xl bg-white p-4">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-sm font-bold text-slate-900">{step.stepName}</span>
-                                <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${tone(step.provider)}`}>{step.provider}</span>
-                                {step.modelName && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-slate-700">{step.modelName}</span>}
-                              </div>
-                              <p className="mt-2 text-sm text-slate-600">{step.outputSummary}</p>
-                            </div>
-                          ))}
-                        </div>
+                        ))}
                       </div>
-                    ))}
+                    </div>
+                    <div className="rounded-[1.5rem] border border-slate-200 bg-white p-5">
+                      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">Note Timeline</p>
+                      <div className="mt-4 space-y-3">
+                        {selectedSupplier.messages.map((message) => (
+                          <ChatBubble key={message.id} sender={message.sender} message={message.message} meta={message.provider || 'system'} />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  <ActionButton
+                    busy={busyAction !== null}
+                    primary
+                    onClick={() =>
+                      runAction(`supplier:${selectedSupplier.id}`, `/api/suppliers/chats/${selectedSupplier.id}/simulate-send`, {
+                        body: JSON.stringify({ message: 'Please reconfirm stock, dispatch timing, and replacement handling for this SKU.' }),
+                      })
+                    }
+                  >
+                    Add Follow-Up Note
+                  </ActionButton>
                 </div>
-              </article>
+              )}
+            </section>
+          </div>
+        )}
+
+        {tab === 'customers' && (
+          <section className={`${card} mt-6 p-5`}>
+            <SectionHeader eyebrow="Customer Messages" title="Read-Only eBay Import + Open in eBay" icon={<MessageCircleMore className="h-5 w-5 text-slate-400" />} />
+            {!data.customers.connected && (
+              <div className="mt-5 rounded-[1.5rem] border border-amber-200 bg-amber-50 p-5">
+                <p className="text-sm font-bold text-amber-900">Waiting for eBay connection</p>
+                <p className="mt-2 text-sm text-amber-800">{data.customers.waitingReason}</p>
+              </div>
+            )}
+            <div className="mt-5 grid gap-4 xl:grid-cols-2">
+              {data.customers.conversations.length === 0 && <EmptyState title="No imported customer conversations" body="Once eBay messaging is connected, the last 90 days of customer messages will appear here in read-only mode." />}
+              {data.customers.conversations.map((conversation) => (
+                <div key={conversation.id} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{conversation.buyerUserId}</p>
+                      <h3 className="mt-1 text-lg font-black text-slate-950">{conversation.subject}</h3>
+                    </div>
+                    <Pill value={conversation.autoSendEligible ? 'passed' : 'warning'} />
+                  </div>
+                  <p className="mt-2 text-sm text-slate-500">{conversation.messages.length} imported message(s). Safe shipping-status updates only.</p>
+                  {conversation.openInEbayUrl && (
+                    <a href={conversation.openInEbayUrl} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-xs font-black uppercase tracking-[0.18em] text-slate-700 hover:bg-slate-50">
+                      Open in eBay
+                      <ExternalLink className="h-4 w-4" />
+                    </a>
+                  )}
+                </div>
+              ))}
             </div>
-          )}
-        </section>
+          </section>
+        )}
+
+        {tab === 'architecture' && (
+          <div className="mt-6 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Live Flowchart" title="CJ -> Score -> Draft -> Publish -> Fulfill -> Support" icon={<Layers3 className="h-5 w-5 text-slate-400" />} />
+              <pre className="mt-5 overflow-x-auto rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5 text-sm leading-6 text-slate-700">{data.architecture.flowchart}</pre>
+            </section>
+            <section className={`${card} p-5`}>
+              <SectionHeader eyebrow="Contracts" title="Role, Inputs, Outputs, Validators, Routing" icon={<ShieldAlert className="h-5 w-5 text-slate-400" />} />
+              <div className="mt-5 space-y-4">
+                {data.architecture.contracts.map((contract) => (
+                  <div key={contract.agentId} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-5">
+                    <h3 className="text-lg font-black text-slate-950">{contract.agentId.replace(/_/g, ' ')}</h3>
+                    <p className="mt-2 text-sm text-slate-600">{contract.role}</p>
+                    <div className="mt-4 grid gap-4 md:grid-cols-2">
+                      <ListBlock title="Inputs" items={contract.inputs} />
+                      <ListBlock title="Outputs" items={contract.outputs} />
+                      <ListBlock title="Hard Validators" items={contract.hardValidators} />
+                      <ListBlock title="Soft Validators" items={contract.softValidators} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {tab === 'validation' && (
+          <section className={`${card} mt-6 p-5`}>
+            <SectionHeader eyebrow="Validation Queue" title="Blocked, Warnings, Passed" icon={<ShieldAlert className="h-5 w-5 text-slate-400" />} />
+            <div className="mt-5 grid gap-4 md:grid-cols-5">
+              <KpiCard label="Passed" value={data.validation.stats.passed} note="Validation runs" />
+              <KpiCard label="Warnings" value={data.validation.stats.warnings} note="Visible and queryable" />
+              <KpiCard label="Failed" value={data.validation.stats.failed} note="Blocked outputs" />
+              <KpiCard label="Fallback Runs" value={data.validation.stats.fallbackRuns} note="Provider downgrade visible" />
+              <KpiCard label="Simulated Runs" value={data.validation.stats.simulatedRuns} note="Hidden states avoided" />
+            </div>
+            <div className="mt-5 space-y-3">
+              {data.validation.runs.map((run) => (
+                <div key={run.id} className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-black text-slate-950">{run.agentId.replace(/_/g, ' ')}</p>
+                    <Pill value={run.status} />
+                    {run.simulatedData && <Pill value="simulated" />}
+                    {run.fallbackUsed && <Pill value="fallback" />}
+                  </div>
+                  <p className="mt-2 text-sm text-slate-600">Score {run.score} / refinement count {run.refinementCount}</p>
+                  <div className="mt-3 space-y-2">
+                    {run.validatorResults.slice(0, 4).map((result) => (
+                      <p key={result.validatorId} className="text-sm text-slate-700">
+                        - <span className="font-semibold">{result.name}</span>: {result.observed}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
     </div>
   );
@@ -981,7 +750,7 @@ function ActionButton(props: { onClick: () => void; busy: boolean; primary?: boo
     <button
       onClick={props.onClick}
       disabled={props.busy}
-      className={`rounded-2xl px-5 py-3 text-xs font-black uppercase tracking-[0.18em] transition disabled:cursor-not-allowed disabled:opacity-60 ${
+      className={`rounded-2xl px-4 py-3 text-xs font-black uppercase tracking-[0.18em] transition disabled:cursor-not-allowed disabled:opacity-60 ${
         props.primary ? 'bg-blue-600 text-white hover:bg-blue-500' : 'border border-white/20 bg-white/10 text-white hover:bg-white/20'
       }`}
     >
@@ -990,24 +759,34 @@ function ActionButton(props: { onClick: () => void; busy: boolean; primary?: boo
   );
 }
 
-function HeroStat(props: { label: string; value: string; badgeTone: string }) {
+function HeroBadge(props: { label: string; value: string; toneClass: string }) {
   return (
-    <div className="rounded-[1.5rem] border border-white/10 bg-white/10 p-5 backdrop-blur">
+    <div className="rounded-[1.5rem] border border-white/10 bg-white/10 p-5">
       <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-300">{props.label}</p>
       <div className="mt-3">
-        <span className={`rounded-full px-3 py-1 text-xs font-black uppercase tracking-[0.18em] ${props.badgeTone}`}>{props.value}</span>
+        <span className={`rounded-full px-3 py-1 text-xs font-black uppercase tracking-[0.18em] ${props.toneClass}`}>{props.value}</span>
       </div>
     </div>
   );
 }
 
-function HeroCard(props: { label: string; value: string; note: string }) {
+function HeroInfo(props: { label: string; value: string; note: string }) {
   return (
-    <div className="rounded-[1.5rem] border border-white/10 bg-white/10 p-5 backdrop-blur">
+    <div className="rounded-[1.5rem] border border-white/10 bg-white/10 p-5">
       <p className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-300">{props.label}</p>
-      <div className="mt-3 text-lg font-black">{props.value}</div>
+      <p className="mt-3 text-lg font-black">{props.value}</p>
       <p className="mt-1 text-xs text-slate-300">{props.note}</p>
     </div>
+  );
+}
+
+function KpiCard(props: { label: string; value: string | number; note: string }) {
+  return (
+    <article className={`${card} p-5`}>
+      <p className="text-xs font-black uppercase tracking-[0.18em] text-slate-400">{props.label}</p>
+      <p className="mt-3 text-3xl font-black text-slate-950">{props.value}</p>
+      <p className="mt-1 text-xs text-slate-500">{props.note}</p>
+    </article>
   );
 }
 
@@ -1023,121 +802,196 @@ function SectionHeader(props: { eyebrow: string; title: string; icon: ReactNode 
   );
 }
 
-function MiniStat(props: { label: string; value: string | number; inverted?: boolean }) {
-  return (
-    <div className={`rounded-2xl px-3 py-3 ${props.inverted ? 'bg-white/10 text-white' : 'bg-white text-slate-950'}`}>
-      <p className={`text-[10px] font-black uppercase tracking-[0.18em] ${props.inverted ? 'text-slate-300' : 'text-slate-400'}`}>{props.label}</p>
-      <p className="mt-1 text-sm font-black">{props.value}</p>
-    </div>
-  );
+function Pill(props: { value: string; inverted?: boolean }) {
+  const value = props.value.replace(/_/g, ' ');
+  return <span className={`rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] ${props.inverted ? 'bg-white/15 text-white' : tone(props.value)}`}>{value}</span>;
 }
 
-function ArchitectureList(props: { title: string; items: string[] }) {
-  return (
-    <div className="rounded-2xl bg-white p-4">
-      <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">{props.title}</p>
-      <div className="mt-3 space-y-2">
-        {props.items.length === 0 ? (
-          <p className="text-sm text-slate-500">No items configured.</p>
-        ) : (
-          props.items.map((item) => (
-            <p key={item} className="text-sm text-slate-700">
-              - {item}
-            </p>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ArchitectureNote(props: { label: string; text: string }) {
+function Metric(props: { label: string; value: string }) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
       <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">{props.label}</p>
-      <p className="mt-2 text-sm text-slate-700">{props.text}</p>
+      <p className="mt-1 text-sm font-bold text-slate-900">{props.value}</p>
     </div>
   );
 }
 
-function EmptyState(props: { title: string; body: string; compact?: boolean }) {
+function MetricRow(props: { label: string; value: string }) {
   return (
-    <div className={`rounded-[1.75rem] border border-dashed border-slate-200 bg-slate-50/80 ${props.compact ? 'p-4' : 'p-6'}`}>
+    <div>
+      <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">{props.label}</p>
+      <p className="mt-1 text-sm text-slate-700">{props.value}</p>
+    </div>
+  );
+}
+
+function InfoBlock(props: { label: string; body: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">{props.label}</p>
+      <p className="mt-2 text-sm text-slate-700">{props.body}</p>
+    </div>
+  );
+}
+
+function EmptyState(props: { title: string; body: string }) {
+  return (
+    <div className="rounded-[1.5rem] border border-dashed border-slate-200 bg-slate-50 p-6">
       <h3 className="text-sm font-black uppercase tracking-[0.18em] text-slate-900">{props.title}</h3>
       <p className="mt-2 text-sm text-slate-500">{props.body}</p>
     </div>
   );
 }
 
-function InventoryPanel(props: { title: string; items: number; children: ReactNode }) {
+function DraftColumn(props: {
+  title: string;
+  drafts: ListingDraft[];
+  inventory: InventoryPayload;
+  busyAction: BusyAction;
+  onApprove?: (draftId: string) => Promise<void>;
+  onReject?: (draftId: string) => Promise<void>;
+  onPublish?: (draftId: string) => Promise<void>;
+  onRefine?: (draft: ListingDraft) => Promise<void>;
+}) {
   return (
-    <div className="rounded-[1.75rem] border border-slate-200 bg-slate-50/80 p-5">
+    <div className="rounded-[1.5rem] border border-slate-200 bg-slate-50 p-4">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-lg font-black tracking-tight text-slate-950">{props.title}</h3>
-        <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">{props.items}</span>
+        <h3 className="text-lg font-black text-slate-950">{props.title}</h3>
+        <span className="rounded-full bg-white px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">{props.drafts.length}</span>
       </div>
-      <div className="mt-4 space-y-3">{props.children}</div>
+      <div className="mt-4 space-y-3">
+        {props.drafts.length === 0 && <p className="text-sm text-slate-500">No drafts in this bucket.</p>}
+        {props.drafts.map((draft) => {
+          const candidate = props.inventory.candidates.find((item) => item.id === draft.candidateId);
+          return (
+            <div key={draft.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+              <div className="flex gap-3">
+                <img src={candidate?.imageUrl || draft.images[0] || 'https://placehold.co/160x160?text=Draft'} alt={draft.title} className="h-16 w-16 rounded-2xl object-cover" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-lg font-black text-slate-950">{draft.overallScore ?? '--'}</span>
+                    <Pill value={draft.status} />
+                    <Pill value={draft.validationStatus} />
+                  </div>
+                  <h4 className="mt-2 text-sm font-bold text-slate-900">{draft.title}</h4>
+                  <p className="mt-1 text-xs text-slate-500">{draft.sellerSku}</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
+                    <p>Price {currency(draft.price)}</p>
+                    <p>Margin {formatPct(candidate?.scoreBreakdown?.netMarginPercent)}</p>
+                  </div>
+                  {draft.warningMessages[0] && <p className="mt-2 text-xs text-amber-700">{draft.warningMessages[0]}</p>}
+                </div>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {props.onRefine && draft.status === 'needs_review' && (
+                  <button
+                    onClick={() => props.onRefine?.(draft)}
+                    disabled={props.busyAction !== null}
+                    className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700 disabled:opacity-60"
+                  >
+                    Refine Draft
+                  </button>
+                )}
+                {props.onApprove && draft.status === 'needs_review' && (
+                  <button
+                    onClick={() => props.onApprove?.(draft.id)}
+                    disabled={props.busyAction !== null}
+                    className="rounded-2xl bg-blue-600 px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-white disabled:opacity-60"
+                  >
+                    Approve & Queue Publish
+                  </button>
+                )}
+                {props.onReject && draft.status === 'needs_review' && (
+                  <button
+                    onClick={() => props.onReject?.(draft.id)}
+                    disabled={props.busyAction !== null}
+                    className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-rose-700 disabled:opacity-60"
+                  >
+                    Reject
+                  </button>
+                )}
+                {props.onPublish && draft.status === 'ready_to_publish' && (
+                  <button
+                    onClick={() => props.onPublish?.(draft.id)}
+                    disabled={props.busyAction !== null}
+                    className="rounded-2xl bg-slate-950 px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-white disabled:opacity-60"
+                  >
+                    Confirm Live Publish
+                  </button>
+                )}
+                {draft.openInEbayUrl && (
+                  <a href={draft.openInEbayUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">
+                    Open in eBay
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-function InventoryCard(props: { key?: string; candidate: ProductCandidate }) {
-  const { candidate } = props;
+function CandidateGroup(props: { title: string; items: ProductCandidate[]; selectedId: string | null; onSelect: (id: string) => void }) {
   return (
-    <div className="rounded-2xl bg-white p-4">
-      <div className="flex gap-4">
-        <img src={candidate.imageUrl} alt={candidate.title} className="h-16 w-16 rounded-2xl object-cover" />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={`text-xl font-black ${scoreTone(candidate)}`}>{candidate.scoreBreakdown?.totalScore ?? '--'}</span>
-            <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${tone(candidate.status)}`}>{candidate.status.replace(/_/g, ' ')}</span>
-          </div>
-          <h4 className="mt-2 text-sm font-bold text-slate-900">{candidate.title}</h4>
-          <p className="mt-1 text-xs text-slate-500">{candidate.sellerSku} / {candidate.supplierName}</p>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
-            <p>Landed {money(candidate.landedCost)}</p>
-            <p>Target {money(candidate.targetPrice)}</p>
-            <p>Stock {candidate.stock}</p>
-            <p>ETA {candidate.estimatedDeliveryBusinessDays}d</p>
-          </div>
-          {candidate.policyMatches.length > 0 && <p className="mt-2 text-xs text-rose-600">{candidate.policyMatches[0]}</p>}
-        </div>
+    <div>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-lg font-black text-slate-950">{props.title}</h3>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-black uppercase tracking-[0.18em] text-slate-700">{props.items.length}</span>
+      </div>
+      <div className="space-y-3">
+        {props.items.slice(0, 10).map((candidate) => (
+          <button
+            key={candidate.id}
+            onClick={() => props.onSelect(candidate.id)}
+            className={`w-full rounded-[1.5rem] border px-4 py-4 text-left transition ${
+              props.selectedId === candidate.id ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+            }`}
+          >
+            <div className="flex items-start gap-3">
+              <img src={candidate.imageUrl} alt={candidate.title} className="h-14 w-14 rounded-2xl object-cover" />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`text-xl font-black ${props.selectedId === candidate.id ? 'text-white' : decisionTone(candidate)}`}>{candidate.scoreBreakdown?.totalScore ?? '--'}</span>
+                  <Pill value={candidate.status} inverted={props.selectedId === candidate.id} />
+                </div>
+                <p className="mt-2 line-clamp-2 text-sm font-bold">{candidate.title}</p>
+                <p className={`mt-1 text-xs ${props.selectedId === candidate.id ? 'text-slate-300' : 'text-slate-500'}`}>{currency(candidate.landedCost)} / ETA {candidate.estimatedDeliveryBusinessDays}d / margin {formatPct(candidate.scoreBreakdown?.netMarginPercent)}</p>
+              </div>
+            </div>
+          </button>
+        ))}
       </div>
     </div>
   );
 }
 
-function DraftInventoryCard(props: { key?: string; draftTitle: string; sellerSku: string; status: DraftStatus; candidate?: ProductCandidate }) {
-  return (
-    <div className="rounded-2xl bg-white p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h4 className="text-sm font-bold text-slate-900">{props.draftTitle}</h4>
-          <p className="mt-1 text-xs text-slate-500">{props.sellerSku}</p>
-        </div>
-        <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${tone(props.status)}`}>{props.status.replace(/_/g, ' ')}</span>
-      </div>
-      {props.candidate && (
-        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
-          <p>Demand {props.candidate.scoreBreakdown?.demandScore ?? '--'}</p>
-          <p>Margin {props.candidate.scoreBreakdown?.netMarginPercent ?? '--'}%</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ChatBubble(props: { key?: string; sender: string; message: string; provider: string | null; modelName: string | null; createdAt: string }) {
+function ChatBubble(props: { key?: string; sender: string; message: string; meta: string }) {
   const outbound = props.sender === 'owner' || props.sender === 'ceo';
   return (
-    <div className={`rounded-[1.75rem] border p-4 ${outbound ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-900'}`}>
+    <div className={`rounded-[1.4rem] border p-4 ${outbound ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-900'}`}>
       <div className="flex flex-wrap items-center gap-2">
         <span className={`text-[11px] font-black uppercase tracking-[0.18em] ${outbound ? 'text-blue-200' : 'text-slate-400'}`}>{props.sender}</span>
-        {props.provider && <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${outbound ? 'bg-white/10 text-white' : tone(props.provider)}`}>{props.provider}</span>}
-        {props.modelName && <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${outbound ? 'bg-white/10 text-white' : 'bg-slate-100 text-slate-700'}`}>{props.modelName}</span>}
+        <span className={`rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.18em] ${outbound ? 'bg-white/10 text-white' : 'bg-slate-100 text-slate-700'}`}>{props.meta}</span>
       </div>
       <p className={`mt-3 text-sm ${outbound ? 'text-slate-100' : 'text-slate-700'}`}>{props.message}</p>
-      <p className={`mt-2 text-xs ${outbound ? 'text-slate-300' : 'text-slate-500'}`}>{new Date(props.createdAt).toLocaleString()}</p>
+    </div>
+  );
+}
+
+function ListBlock(props: { title: string; items: string[] }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4">
+      <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-400">{props.title}</p>
+      <div className="mt-3 space-y-2">
+        {props.items.map((item) => (
+          <p key={item} className="text-sm text-slate-700">
+            - {item}
+          </p>
+        ))}
+      </div>
     </div>
   );
 }

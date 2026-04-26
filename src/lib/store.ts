@@ -334,6 +334,25 @@ function createMessage(sender: ConversationMessage['sender'], direction: Convers
   };
 }
 
+function normalizeDraftStatus(status: unknown): 'needs_review' | 'ready_to_publish' | 'published' | 'rejected' {
+  switch (status) {
+    case 'APPROVED':
+    case 'PUBLISHING':
+    case 'ready_to_publish':
+      return 'ready_to_publish';
+    case 'PUBLISHED':
+    case 'published':
+      return 'published';
+    case 'REJECTED':
+    case 'FAILED':
+    case 'ROLLED_BACK':
+    case 'rejected':
+      return 'rejected';
+    default:
+      return 'needs_review';
+  }
+}
+
 function createDefaultSupplierChats(): SupplierConversation[] {
   return [
     {
@@ -347,6 +366,8 @@ function createDefaultSupplierChats(): SupplierConversation[] {
       lastMessage: 'We can hold same-day dispatch inventory once your weekly volume stabilizes.',
       lastMessageAt: nowIso(),
       responseEtaHours: 2,
+      openInCjUrl: 'https://app.cjdropshipping.com/',
+      notes: [{ id: createId('note'), body: 'Supplier note: same-day dispatch can be negotiated once weekly volume stabilizes.', createdAt: nowIso() }],
       messages: [
         createMessage('supplier', 'inbound', 'We can hold same-day dispatch inventory once your weekly volume stabilizes.', 'cj', null),
         createMessage('agent', 'internal', 'Supplier Liaison Agent marked this thread as ready for a volume follow-up.', 'system', null),
@@ -364,6 +385,8 @@ function createDefaultSupplierChats(): SupplierConversation[] {
       lastMessage: 'Awaiting reply on packaging photos and replacement handling.',
       lastMessageAt: nowIso(),
       responseEtaHours: 6,
+      openInCjUrl: 'https://app.cjdropshipping.com/',
+      notes: [{ id: createId('note'), body: 'Supplier note: waiting on packaging evidence and replacement handling details.', createdAt: nowIso() }],
       messages: [
         createMessage('owner', 'outbound', 'Please confirm packaging photos, lot consistency, and replacement handling for US dispatch.'),
         createMessage('agent', 'internal', 'Supplier Liaison Agent is watching this thread and will surface delays.', 'system', null),
@@ -433,15 +456,45 @@ function normalizeState(raw: Partial<AppState> | undefined, config: RuntimeConfi
     connections: Array.isArray(snapshot.connections) ? snapshot.connections : defaults.connections,
     prohibitedRules: Array.isArray(snapshot.prohibitedRules) ? snapshot.prohibitedRules : defaults.prohibitedRules,
     veroBlocklist: Array.isArray(snapshot.veroBlocklist) ? snapshot.veroBlocklist : defaults.veroBlocklist,
-    candidates: Array.isArray(snapshot.candidates) ? snapshot.candidates : defaults.candidates,
-    listingDrafts: Array.isArray(snapshot.listingDrafts) ? snapshot.listingDrafts : defaults.listingDrafts,
+    candidates: Array.isArray(snapshot.candidates)
+      ? snapshot.candidates.map((candidate) => ({
+          ...candidate,
+          rejectionReasons: Array.isArray(candidate.rejectionReasons) ? candidate.rejectionReasons : Array.isArray(candidate.policyMatches) ? candidate.policyMatches : [],
+          openInCjUrl: candidate.openInCjUrl ?? 'https://app.cjdropshipping.com/',
+        }))
+      : defaults.candidates,
+    listingDrafts: Array.isArray(snapshot.listingDrafts)
+      ? snapshot.listingDrafts.map((draft) => ({
+          ...draft,
+          status: normalizeDraftStatus(draft.status),
+          overallScore: draft.overallScore ?? null,
+          validationStatus: draft.validationStatus || 'warning',
+          publishReady: draft.publishReady ?? normalizeDraftStatus(draft.status) === 'ready_to_publish',
+          historicalImport: draft.historicalImport ?? false,
+          openInEbayUrl: draft.openInEbayUrl ?? null,
+          openInCjUrl: draft.openInCjUrl ?? null,
+          warningMessages: Array.isArray(draft.warningMessages) ? draft.warningMessages : [],
+        }))
+      : defaults.listingDrafts,
     orders: Array.isArray(snapshot.orders) ? snapshot.orders : defaults.orders,
     fulfillmentJobs: Array.isArray(snapshot.fulfillmentJobs) ? snapshot.fulfillmentJobs : defaults.fulfillmentJobs,
     deadLetters: Array.isArray(snapshot.deadLetters) ? snapshot.deadLetters : defaults.deadLetters,
     alerts: Array.isArray(snapshot.alerts) ? snapshot.alerts : defaults.alerts,
     supportThreads: Array.isArray(snapshot.supportThreads) ? snapshot.supportThreads : defaults.supportThreads,
-    supplierChats: Array.isArray(snapshot.supplierChats) ? snapshot.supplierChats : defaults.supplierChats,
-    customerChats: Array.isArray(snapshot.customerChats) ? snapshot.customerChats : defaults.customerChats,
+    supplierChats: Array.isArray(snapshot.supplierChats)
+      ? snapshot.supplierChats.map((chat) => ({
+          ...chat,
+          openInCjUrl: chat.openInCjUrl ?? 'https://app.cjdropshipping.com/',
+          notes: Array.isArray(chat.notes) ? chat.notes : [],
+        }))
+      : defaults.supplierChats,
+    customerChats: Array.isArray(snapshot.customerChats)
+      ? snapshot.customerChats.map((chat) => ({
+          ...chat,
+          openInEbayUrl: chat.openInEbayUrl ?? null,
+          autoSendEligible: chat.autoSendEligible ?? false,
+        }))
+      : defaults.customerChats,
     importedListings: Array.isArray(snapshot.importedListings) ? snapshot.importedListings : defaults.importedListings,
     importedOrders: Array.isArray(snapshot.importedOrders) ? snapshot.importedOrders : defaults.importedOrders,
     agentDefinitions: Array.isArray(snapshot.agentDefinitions) && snapshot.agentDefinitions.length > 0 ? snapshot.agentDefinitions : defaults.agentDefinitions,

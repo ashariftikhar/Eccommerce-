@@ -102,8 +102,8 @@ export function scoreCandidate(args: {
   if (args.product.warehouseCountry !== 'US') {
     hardRejectReasons.push('Warehouse is not US-based.');
   }
-  if (args.product.estimatedDeliveryBusinessDays > 5) {
-    hardRejectReasons.push('Estimated delivery exceeds 5 business days.');
+  if (args.product.estimatedDeliveryBusinessDays > 7) {
+    hardRejectReasons.push('Estimated delivery exceeds 7 business days.');
   }
   if (netMarginPercent < 25) {
     hardRejectReasons.push('Net margin below 25%.');
