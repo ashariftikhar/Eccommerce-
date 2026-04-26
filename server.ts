@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { type NextFunction, type Request, type Response } from 'express';
 import {
   ArchitecturePayload,
   AgentExecution,
@@ -438,6 +439,10 @@ async function startServer() {
 
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+  const safe =
+    (handler: (req: Request, res: Response, next: NextFunction) => Promise<void>) =>
+    (req: Request, res: Response, next: NextFunction) =>
+      handler(req, res, next).catch(next);
 
   app.get('/api/debug/env', (_req, res) => {
     const cfg = loadConfig();
@@ -452,77 +457,77 @@ async function startServer() {
     });
   });
 
-  app.get('/api/dashboard', async (_req, res) => {
+  app.get('/api/dashboard', safe(async (_req, res) => {
     res.json(await buildDashboard());
-  });
-  app.get('/api/overview', async (_req, res) => {
+  }));
+  app.get('/api/overview', safe(async (_req, res) => {
     res.json(await buildOverviewPayload());
-  });
-  app.get('/api/agents', async (_req, res) => {
+  }));
+  app.get('/api/agents', safe(async (_req, res) => {
     res.json(await buildAgentsPayload());
-  });
-  app.get('/api/agents/:agentId/executions', async (req, res) => {
+  }));
+  app.get('/api/agents/:agentId/executions', safe(async (req, res) => {
     const state = await getState();
     res.json({
       generatedAt: new Date().toISOString(),
       executions: state.agentExecutions.filter((execution) => execution.agentId === req.params.agentId).slice(0, 40),
     });
-  });
-  app.get('/api/store', async (_req, res) => {
+  }));
+  app.get('/api/store', safe(async (_req, res) => {
     res.json(await buildStorePayload());
-  });
-  app.get('/api/inventory', async (_req, res) => {
+  }));
+  app.get('/api/inventory', safe(async (_req, res) => {
     res.json(await buildInventoryPayload());
-  });
-  app.get('/api/orders', async (_req, res) => {
+  }));
+  app.get('/api/orders', safe(async (_req, res) => {
     res.json(await buildOrdersPayload());
-  });
-  app.get('/api/suppliers/chats', async (_req, res) => {
+  }));
+  app.get('/api/suppliers/chats', safe(async (_req, res) => {
     res.json(await buildSupplierChatsPayload());
-  });
-  app.get('/api/customer-chats', async (_req, res) => {
+  }));
+  app.get('/api/customer-chats', safe(async (_req, res) => {
     res.json(await buildCustomerChatsPayload());
-  });
-  app.get('/api/ceo-chat', async (_req, res) => {
+  }));
+  app.get('/api/ceo-chat', safe(async (_req, res) => {
     res.json(await buildCeoChatPayload());
-  });
-  app.get('/api/architecture', async (_req, res) => {
+  }));
+  app.get('/api/architecture', safe(async (_req, res) => {
     res.json(await buildArchitecturePayload());
-  });
-  app.get('/api/validation', async (_req, res) => {
+  }));
+  app.get('/api/validation', safe(async (_req, res) => {
     res.json(await buildValidationPayload());
-  });
-  app.get('/api/validation/:executionId', async (req, res) => {
+  }));
+  app.get('/api/validation/:executionId', safe(async (req, res) => {
     const state = await getState();
     res.json({
       generatedAt: new Date().toISOString(),
       runs: state.validationRuns.filter((run) => run.executionId === req.params.executionId),
     });
-  });
-  app.get('/api/agents/:agentId/contract', async (req, res) => {
+  }));
+  app.get('/api/agents/:agentId/contract', safe(async (req, res) => {
     const state = await getState();
     res.json({
       generatedAt: new Date().toISOString(),
       contract: getAgentContract(state, req.params.agentId as AgentId),
     });
-  });
+  }));
 
-  app.post('/api/discovery/run', async (_req, res) => {
+  app.post('/api/discovery/run', safe(async (_req, res) => {
     const summary = await runDiscoveryCycle(services);
     res.json({ success: true, summary });
-  });
+  }));
 
-  app.post('/api/drafts/:draftId/approve', async (req, res) => {
+  app.post('/api/drafts/:draftId/approve', safe(async (req, res) => {
     const draft = await approveDraft(services, req.params.draftId, 'owner');
     res.json({ success: true, draft });
-  });
+  }));
 
-  app.post('/api/drafts/:draftId/reject', async (req, res) => {
+  app.post('/api/drafts/:draftId/reject', safe(async (req, res) => {
     const draft = await rejectDraft(services, req.params.draftId, 'owner');
     res.json({ success: true, draft });
-  });
+  }));
 
-  app.post('/api/drafts/:draftId/publish', async (req, res) => {
+  app.post('/api/drafts/:draftId/publish', safe(async (req, res) => {
     const store = createStoreAdapter(config);
     const state = await store.getState();
     state.settings.publishingEnabled = true;
@@ -535,47 +540,52 @@ async function startServer() {
     await store.saveState(state);
     const processed = await runWorkerTick();
     res.json({ success: true, processedJobs: processed });
-  });
+  }));
 
-  app.post('/api/suppliers/chats/:chatId/simulate-send', async (req, res) => {
+  app.post('/api/suppliers/chats/:chatId/simulate-send', safe(async (req, res) => {
     const message = typeof req.body?.message === 'string' && req.body.message.trim() ? req.body.message.trim() : 'Please confirm the latest stock and dispatch timing for this SKU.';
     await simulateSupplierFollowUp(services, req.params.chatId, message);
     res.json({ success: true });
-  });
+  }));
 
-  app.post('/api/ceo-chat/messages', async (req, res) => {
+  app.post('/api/ceo-chat/messages', safe(async (req, res) => {
     const message = typeof req.body?.message === 'string' && req.body.message.trim() ? req.body.message.trim() : 'Give me the current state of the operation.';
     await sendCeoMessage(services, message);
     res.json({ success: true });
-  });
-  app.post('/api/validation/:executionId/rerun', async (req, res) => {
+  }));
+  app.post('/api/validation/:executionId/rerun', safe(async (req, res) => {
     await rerunValidationForExecution(services, req.params.executionId);
     res.json({ success: true });
-  });
-  app.post('/api/validation/:executionId/refine', async (req, res) => {
+  }));
+  app.post('/api/validation/:executionId/refine', safe(async (req, res) => {
     await refineValidationForExecution(services, req.params.executionId);
     res.json({ success: true });
-  });
+  }));
 
-  app.post('/api/system/mode/approval', async (_req, res) => {
+  app.post('/api/system/mode/approval', safe(async (_req, res) => {
     await enableApprovalPhase(services);
     res.json({ success: true });
-  });
+  }));
 
-  app.post('/api/system/kill-switch', async (_req, res) => {
+  app.post('/api/system/kill-switch', safe(async (_req, res) => {
     await activateKillSwitch(services);
     const processed = await runWorkerTick();
     res.json({ success: true, processedJobs: processed });
-  });
+  }));
 
-  app.post('/api/system/resume', async (_req, res) => {
+  app.post('/api/system/resume', safe(async (_req, res) => {
     await resumeAutomation(services);
     res.json({ success: true });
-  });
+  }));
 
-  app.post('/api/worker/tick', async (_req, res) => {
+  app.post('/api/worker/tick', safe(async (_req, res) => {
     const processed = await runWorkerTick();
     res.json({ success: true, processedJobs: processed });
+  }));
+
+  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const message = error instanceof Error ? error.message : 'Unexpected server error';
+    res.status(500).json({ success: false, error: message });
   });
 
   if (config.nodeEnv !== 'production') {

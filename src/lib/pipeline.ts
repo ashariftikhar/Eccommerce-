@@ -149,6 +149,9 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
   const state = await services.store.getState();
   const cjIsReal = Boolean(services.config.cj.accessToken && services.config.cj.apiKey);
   const ebayIsReal = Boolean(services.config.ebay.clientId || services.config.ebay.sandboxClientId);
+  const draftsCreatedToday = state.listingDrafts.filter((draft) => draft.createdAt.slice(0, 10) === nowIso().slice(0, 10)).length;
+  const remainingDraftBudget = Math.max(0, 20 - draftsCreatedToday);
+  let usedSyntheticCatalog = !cjIsReal;
 
   const discoveryExec = startExecution(state, 'trend_discovery', 'manual_discovery', {
     summary: 'Starting CJ catalog scan and keyword normalization.',
@@ -163,25 +166,72 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
     summary: 'Generating listing drafts for approved and test candidates.',
   });
 
-  const catalog = await services.cj.fetchCatalog(services.config.cj.scanLimit);
+  let catalog = [];
+  try {
+    catalog = await services.cj.fetchCatalog(services.config.cj.scanLimit);
+  } catch (error) {
+    if (!cjIsReal || services.config.ebay.env !== 'sandbox') {
+      throw error;
+    }
+    usedSyntheticCatalog = true;
+    const fallbackServices = createPipelineServices({
+      ...services.config,
+      cj: {
+        ...services.config.cj,
+        apiKey: null,
+        accessToken: null,
+      },
+    });
+    catalog = await fallbackServices.cj.fetchCatalog(Math.min(services.config.cj.scanLimit, 15));
+    state.alerts = state.alerts.filter((alert) => alert.code !== 'CJ_API_DEGRADED');
+    state.alerts.unshift({
+      id: createId('alert'),
+      code: 'CJ_API_DEGRADED',
+      severity: 'warning',
+      status: 'open',
+      message: 'CJ API rate limit was hit, so sandbox discovery fell back to synthetic products.',
+      context: error instanceof Error ? error.message : 'CJ discovery fallback triggered.',
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    });
+  }
   pushExecutionStep(state, discoveryExec.id, {
     stepName: 'Fetch CJ catalog',
     provider: 'cj',
     modelName: null,
     requestPurpose: 'Pull candidate catalog records',
     inputSummary: `Requested up to ${services.config.cj.scanLimit} CJ products.`,
-    outputSummary: `${catalog.length} products returned from ${cjIsReal ? 'real CJ data' : 'synthetic CJ fallback data'}.`,
+    outputSummary: `${catalog.length} products returned from ${usedSyntheticCatalog ? 'synthetic CJ fallback data' : 'real CJ data'}.`,
     durationMs: 220,
     success: true,
     error: null,
   });
 
   const converted = catalog.map(convertProduct);
-  pushValidationRun(state, validateTrendDiscovery(discoveryExec.id, catalog.length, 0, !cjIsReal));
+  pushValidationRun(state, validateTrendDiscovery(discoveryExec.id, catalog.length, 0, usedSyntheticCatalog));
   const shortlistWithReasons = converted.map((candidate) => ({
     candidate,
     reasons: prefilterProduct(candidate, state),
   }));
+  for (const [index, item] of shortlistWithReasons.entries()) {
+    const candidate = item.candidate;
+    candidate.policyMatches = item.reasons;
+    candidate.status = item.reasons.length > 0 ? 'BLOCKED' : 'DISCOVERED';
+    candidate.riskClass = item.reasons.length > 0 ? 'high' : 'medium';
+    candidate.updatedAt = nowIso();
+    addExecutionLink(candidate, discoveryExec.id);
+    addExecutionLink(candidate, cjExec.id);
+
+    const existing = state.candidates.find((entry) => entry.sourceFingerprint === candidate.sourceFingerprint);
+    const resolvedCandidate = existing ? Object.assign(existing, candidate, { id: existing.id, createdAt: existing.createdAt }) : candidate;
+    if (!existing) {
+      state.candidates.unshift(resolvedCandidate);
+    }
+
+    if (index < 20) {
+      pushValidationRun(state, validateCjMatch(cjExec.id, resolvedCandidate, !cjIsReal));
+    }
+  }
   const shortlisted = shortlistWithReasons.filter((item) => item.reasons.length === 0).slice(0, 80).map((item) => item.candidate);
   pushExecutionStep(state, cjExec.id, {
     stepName: 'Apply CJ prefilter',
@@ -189,7 +239,7 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
     modelName: null,
     requestPurpose: 'Reject non-US, low-stock, slow-shipping, or blocked products before eBay calls',
     inputSummary: `${converted.length} candidate records entered the CJ prefilter.`,
-    outputSummary: `${shortlisted.length} products survived the prefilter. Rejected ${converted.length - shortlisted.length} before market scoring.`,
+    outputSummary: `${shortlisted.length} products survived the prefilter. Rejected ${converted.length - shortlisted.length} before market scoring. Draft budget remaining today: ${remainingDraftBudget}.`,
     durationMs: 95,
     success: true,
     error: null,
@@ -263,7 +313,6 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
     if (!existing) {
       state.candidates.unshift(resolvedCandidate);
     }
-    pushValidationRun(state, validateCjMatch(cjExec.id, resolvedCandidate, !cjIsReal));
     pushValidationRun(state, validateProductScoring(scoringExec.id, resolvedCandidate, !ebayIsReal));
 
     if (index < 8) {
@@ -280,7 +329,11 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
       });
     }
 
-    if ((candidate.status === 'READY_TO_LIST' || candidate.status === 'TEST_ONLY') && !state.listingDrafts.some((draft) => draft.candidateId === resolvedCandidate.id)) {
+    if (
+      drafted < remainingDraftBudget &&
+      (candidate.status === 'READY_TO_LIST' || candidate.status === 'TEST_ONLY') &&
+      !state.listingDrafts.some((draft) => draft.candidateId === resolvedCandidate.id)
+    ) {
       const generated = await services.ai.generateListingPack(state, candidate.sourceFingerprint, candidate);
       const categoryPolicies = await services.ebay.validateCategoryPolicies(candidate);
       const draft: ListingDraft = {
@@ -334,13 +387,27 @@ export async function runDiscoveryCycle(services: PipelineServices): Promise<{ s
     }
   }
 
+  if (cjIsReal && shortlisted.length === 0) {
+    state.alerts = state.alerts.filter((alert) => alert.code !== 'CJ_US_POOL_EMPTY');
+    state.alerts.unshift({
+      id: createId('alert'),
+      code: 'CJ_US_POOL_EMPTY',
+      severity: 'warning',
+      status: 'open',
+      message: 'Real CJ scan returned no US-eligible products for the current prefilter.',
+      context: 'Discovery reached real CJ data, but the scanned page set did not contain products that passed the YuziGoods US-only rules.',
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+    });
+  }
+
   state.settings.lastDiscoveryRunAt = nowIso();
   const discoveryValidation = state.validationRuns.find((run) => run.executionId === discoveryExec.id && run.agentId === 'trend_discovery');
   if (discoveryValidation) {
-    discoveryValidation.validatorResults = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, !cjIsReal).validatorResults;
-    discoveryValidation.status = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, !cjIsReal).status;
-    discoveryValidation.blocking = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, !cjIsReal).blocking;
-    discoveryValidation.score = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, !cjIsReal).score;
+    discoveryValidation.validatorResults = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, usedSyntheticCatalog).validatorResults;
+    discoveryValidation.status = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, usedSyntheticCatalog).status;
+    discoveryValidation.blocking = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, usedSyntheticCatalog).blocking;
+    discoveryValidation.score = validateTrendDiscovery(discoveryExec.id, catalog.length, shortlisted.length, usedSyntheticCatalog).score;
     discoveryValidation.updatedAt = nowIso();
   }
   finishExecution(state, discoveryExec.id, 'completed', `Scanned ${catalog.length} catalog items and normalized discovery input.`);

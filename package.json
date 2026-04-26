@@ -7,6 +7,7 @@
     "dev": "tsx server.ts",
     "diagnostics:agents": "tsx scripts/agent-diagnostics.ts",
     "discovery:once": "tsx scripts/discovery-once.ts",
+    "live:sanity": "tsx scripts/live-sanity.ts",
     "dev:worker": "tsx worker.ts --once",
     "worker": "tsx worker.ts",
     "start": "tsx server.ts",

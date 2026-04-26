@@ -135,6 +135,8 @@ export default function App() {
   const [data, setData] = useState<ConsoleData | null>(null);
   const [tab, setTab] = useState<TabId>('overview');
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [selectedSupplierId, setSelectedSupplierId] = useState<string | null>(null);
   const [ceoPrompt, setCeoPrompt] = useState('');
@@ -167,9 +169,27 @@ export default function App() {
 
   async function runAction(action: BusyAction, url: string, options?: RequestInit) {
     setBusyAction(action);
+    setActionError(null);
     try {
-      await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, ...options });
+      const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, ...options });
+      const payload = (await response.json().catch(() => ({}))) as { error?: string; summary?: { scanned?: number; shortlisted?: number; drafted?: number }; processedJobs?: number };
+      if (!response.ok) {
+        throw new Error(payload.error || 'Action failed.');
+      }
+      if (action === 'discovery' && payload.summary) {
+        setActionMessage(`Discovery ran: scanned ${payload.summary.scanned ?? 0}, shortlisted ${payload.summary.shortlisted ?? 0}, drafted ${payload.summary.drafted ?? 0}.`);
+      } else if (action === 'tick') {
+        setActionMessage(`Worker tick processed ${payload.processedJobs ?? 0} job(s).`);
+      } else if (action === 'resume') {
+        setActionMessage('Automation resumed in approval-required mode.');
+      } else if (action === 'kill-switch') {
+        setActionMessage('Kill switch engaged and rollback jobs were processed.');
+      } else {
+        setActionMessage('Action completed successfully.');
+      }
       await refreshAll();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Action failed.');
     } finally {
       setBusyAction(null);
     }
@@ -232,6 +252,11 @@ export default function App() {
                   Enter Approval Mode
                 </ActionButton>
               </div>
+              {(actionMessage || actionError) && (
+                <div className={`rounded-2xl px-4 py-3 text-sm font-medium ${actionError ? 'bg-rose-500/15 text-rose-100' : 'bg-emerald-500/15 text-emerald-100'}`}>
+                  {actionError || actionMessage}
+                </div>
+              )}
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
