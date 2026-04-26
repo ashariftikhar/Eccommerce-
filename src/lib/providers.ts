@@ -79,7 +79,7 @@ export class CJClient {
     }
 
     const payload = (await response.json()) as { data?: Array<Record<string, unknown>> };
-    const records = payload.data || [];
+    const records = Array.isArray(payload.data) ? payload.data : [];
     return records.slice(0, limit).map((record, index) => ({
       id: String(record.pid || record.productId || `cj_${index}`),
       variantId: String(record.vid || record.variantId || `cjv_${index}`),
