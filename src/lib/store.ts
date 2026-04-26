@@ -1,7 +1,29 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { Pool } from 'pg';
-import { AgentRun, AppState, AutomationSettings, CostBudget, PlatformConnection, RuntimeConfig, SystemAlert, WorkerJob, JobType } from '../types';
+import {
+  AgentDefinition,
+  AgentContract,
+  AgentExecution,
+  AgentExecutionStep,
+  AgentId,
+  AgentRun,
+  AppState,
+  AuditLog,
+  AutomationSettings,
+  CeoChatThread,
+  ConversationMessage,
+  CostBudget,
+  ImportedCustomerConversation,
+  PlatformConnection,
+  RuntimeConfig,
+  SupplierConversation,
+  SystemAlert,
+  ValidationRun,
+  WorkerJob,
+  JobType,
+  ProviderName,
+} from '../types';
 import { nowIso, createId } from './utils';
 import { seedProhibitedRules, seedVeroRules } from './policy';
 
@@ -47,11 +69,36 @@ function createDefaultBudgets(config: RuntimeConfig): CostBudget {
 
 function createDefaultConnections(config: RuntimeConfig): PlatformConnection[] {
   return [
-    { name: 'eBay', status: config.ebay.env === 'sandbox' ? 'sandbox' : 'disconnected', lastCheckedAt: null },
-    { name: 'CJdropshipping', status: config.cj.accessToken ? 'connected' : 'degraded', lastCheckedAt: null },
-    { name: 'DeepSeek', status: config.ai.deepseekApiKey ? 'connected' : 'degraded', lastCheckedAt: null },
-    { name: 'Gemini', status: config.ai.geminiApiKey ? 'connected' : 'degraded', lastCheckedAt: null },
-    { name: 'Supabase / Postgres', status: config.storageDriver === 'postgres' ? 'connected' : 'degraded', lastCheckedAt: null },
+    {
+      name: 'eBay',
+      status: config.ebay.env === 'sandbox' ? 'sandbox' : 'degraded',
+      lastCheckedAt: null,
+      notes: config.ebay.clientId || config.ebay.sandboxClientId ? 'Credentials detected. Historical import will unlock after seller OAuth.' : 'Missing seller OAuth credentials.',
+    },
+    {
+      name: 'CJdropshipping',
+      status: config.cj.accessToken ? 'connected' : 'degraded',
+      lastCheckedAt: null,
+      notes: config.cj.accessToken ? 'Real CJ catalog discovery is enabled.' : 'Synthetic catalog fallback is active until CJ access token is configured.',
+    },
+    {
+      name: 'DeepSeek',
+      status: config.ai.deepseekApiKey ? 'connected' : 'degraded',
+      lastCheckedAt: null,
+      notes: config.ai.deepseekApiKey ? `Primary bulk model: ${config.ai.deepseekModel}` : 'Template fallback only until DeepSeek API key is added.',
+    },
+    {
+      name: 'Gemini',
+      status: config.ai.geminiApiKey ? 'connected' : 'degraded',
+      lastCheckedAt: null,
+      notes: config.ai.geminiApiKey ? `Tie-break and escalation model: ${config.ai.geminiModel}` : 'Fallback disabled until Gemini API key is added.',
+    },
+    {
+      name: 'Supabase / Postgres',
+      status: config.storageDriver === 'postgres' ? 'connected' : 'degraded',
+      lastCheckedAt: null,
+      notes: config.storageDriver === 'postgres' ? 'Production persistence is active.' : 'File storage is active. Connect Supabase Postgres for production persistence.',
+    },
   ];
 }
 
@@ -84,6 +131,262 @@ function createDefaultAlerts(config: RuntimeConfig): SystemAlert[] {
   return alerts;
 }
 
+function createDefaultAgentDefinitions(): AgentDefinition[] {
+  return [
+    {
+      id: 'trend_discovery',
+      name: 'Trend Discovery Agent',
+      purpose: 'Finds high-potential utility products and trends worth validating.',
+      providerPreference: ['system', 'cj', 'ebay'],
+      allowedActions: ['scan_catalog', 'normalize_keywords', 'queue_candidates'],
+    },
+    {
+      id: 'cj_match',
+      name: 'CJ Match Agent',
+      purpose: 'Matches promising ideas to CJ US-warehouse products and stock.',
+      providerPreference: ['cj', 'system'],
+      allowedActions: ['prefilter_us_warehouse', 'stock_check', 'supplier_match'],
+    },
+    {
+      id: 'product_scoring',
+      name: 'Product Scoring Engine',
+      purpose: 'Scores demand, margin, competition, policy, and complexity.',
+      providerPreference: ['ebay', 'system'],
+      allowedActions: ['score_candidate', 'reject_candidate', 'promote_candidate'],
+    },
+    {
+      id: 'listing_generator',
+      name: 'Listing Generator Agent',
+      purpose: 'Creates titles, bullets, descriptions, and item specifics.',
+      providerPreference: ['deepseek', 'gemini', 'system'],
+      allowedActions: ['generate_listing_pack', 'cache_listing_pack'],
+    },
+    {
+      id: 'ebay_publisher',
+      name: 'eBay Listing Publisher',
+      purpose: 'Handles inventory draft creation, offer publishing, and rollback.',
+      providerPreference: ['ebay', 'system'],
+      allowedActions: ['draft_listing', 'publish_listing', 'rollback_listing'],
+    },
+    {
+      id: 'fulfillment',
+      name: 'Fulfillment Agent',
+      purpose: 'Pushes low-risk orders to CJ and tracks placement state.',
+      providerPreference: ['cj', 'system'],
+      allowedActions: ['evaluate_low_risk', 'place_cj_order', 'flag_manual_review'],
+    },
+    {
+      id: 'customer_support',
+      name: 'Customer Support Agent',
+      purpose: 'Summarizes customer issues and drafts safe responses.',
+      providerPreference: ['deepseek', 'gemini', 'system'],
+      allowedActions: ['summarize_thread', 'draft_status_update', 'escalate_issue'],
+    },
+    {
+      id: 'supplier_liaison',
+      name: 'Supplier Liaison Agent',
+      purpose: 'Tracks supplier commitments, issues, and follow-ups.',
+      providerPreference: ['system', 'cj'],
+      allowedActions: ['simulate_follow_up', 'log_supplier_reply', 'mark_issue'],
+    },
+    {
+      id: 'manager',
+      name: 'Manager Agent',
+      purpose: 'Monitors risk, budget, and explains what the system is doing.',
+      providerPreference: ['deepseek', 'gemini', 'system'],
+      allowedActions: ['summarize_state', 'answer_ceo_chat', 'trigger_kill_switch'],
+    },
+  ];
+}
+
+function createDefaultAgentContracts(): AgentContract[] {
+  return [
+    {
+      agentId: 'trend_discovery',
+      role: 'Scans candidate catalog inputs and produces discovery candidates.',
+      inputs: ['CJ catalog feed', 'stored blocklists', 'system scan limits'],
+      outputs: ['candidate batch', 'normalized keywords', 'catalog source mode'],
+      hardValidators: ['catalog availability'],
+      softValidators: ['candidate count threshold', 'synthetic-only source warning', 'repetitive pool detection'],
+      handoffTargets: ['cj_match'],
+      fallbackBehavior: 'Use synthetic catalog only when CJ is unavailable and label the run as simulated.',
+      refinementBehavior: 'Rerun discovery with updated supplier or scan settings.',
+      blockingFailureBehavior: 'Block downstream discovery if no candidate pool can be produced.',
+      optimizationNotes: ['Cache repeated discovery keywords', 'sample warnings once pool quality stabilizes'],
+    },
+    {
+      agentId: 'cj_match',
+      role: 'Filters discovery candidates into US-warehouse, in-stock supplier matches.',
+      inputs: ['discovery candidates', 'supplier stock and ETA', 'cost and policy baseline'],
+      outputs: ['qualified candidate', 'prefilter reasons', 'supplier readiness'],
+      hardValidators: ['US warehouse', 'stock threshold', 'ETA threshold', 'landed cost present', 'supplier identity present'],
+      softValidators: ['supplier issue watch', 'simulated supplier data warning'],
+      handoffTargets: ['product_scoring', 'supplier_liaison'],
+      fallbackBehavior: 'Use cached/synthetic stock estimates only when CJ is disconnected and mark output as simulated.',
+      refinementBehavior: 'Retry supplier match after stock or ETA refresh.',
+      blockingFailureBehavior: 'Mark candidate blocked and stop scoring handoff.',
+      optimizationNotes: ['Avoid rematching unchanged products', 'batch supplier lookups by normalized keyword'],
+    },
+    {
+      agentId: 'product_scoring',
+      role: 'Scores candidates across demand, competition, margin, risk, and policy.',
+      inputs: ['qualified candidate', 'market snapshot', 'policy evaluation'],
+      outputs: ['score breakdown', 'decision', 'hard reject reasons'],
+      hardValidators: ['score breakdown complete', 'decision present', 'total score in range', 'decision consistent with reject reasons'],
+      softValidators: ['simulated eBay market data warning'],
+      handoffTargets: ['listing_generator', 'manager'],
+      fallbackBehavior: 'Use simulated market data only when eBay market APIs are unavailable.',
+      refinementBehavior: 'Rerun scoring after refreshed market snapshot or policy changes.',
+      blockingFailureBehavior: 'Move candidate to validation review / blocked state.',
+      optimizationNotes: ['Revalidate only when candidate fingerprint or snapshot changes'],
+    },
+    {
+      agentId: 'listing_generator',
+      role: 'Produces listing packs and draft listings for scored candidates.',
+      inputs: ['score-qualified candidate', 'policy warnings', 'provider budget state'],
+      outputs: ['listing pack', 'draft listing', 'generation provenance'],
+      hardValidators: ['title present', 'description present', 'item specifics present', 'price present', 'images present'],
+      softValidators: ['template fallback warning', 'provider downgrade warning', 'category policy warning'],
+      handoffTargets: ['ebay_publisher', 'manager'],
+      fallbackBehavior: 'Use deterministic template pack when AI budget or providers are unavailable.',
+      refinementBehavior: 'Regenerate once, then block and surface for review.',
+      blockingFailureBehavior: 'Do not create or route invalid drafts downstream.',
+      optimizationNotes: ['Cache listing packs by product fingerprint for 30 days'],
+    },
+    {
+      agentId: 'ebay_publisher',
+      role: 'Creates inventory items, publishes offers, and handles rollback.',
+      inputs: ['approved draft', 'publish settings', 'marketplace state'],
+      outputs: ['inventory item', 'offer publish result', 'rollback state'],
+      hardValidators: ['inventory item created', 'offer publish succeeded', 'duplicate SKU prevented'],
+      softValidators: ['sandbox/simulated publish warning'],
+      handoffTargets: ['fulfillment', 'customer_support', 'manager'],
+      fallbackBehavior: 'Stay in sandbox/simulated publish mode until production credentials are live.',
+      refinementBehavior: 'Retry publish after metadata correction or approval review.',
+      blockingFailureBehavior: 'Fail publish, alert manager, and preserve rollback path.',
+      optimizationNotes: ['Reuse SKU-based idempotency checks before publish'],
+    },
+    {
+      agentId: 'fulfillment',
+      role: 'Evaluates low-risk orders and pushes eligible ones to CJ.',
+      inputs: ['paid order', 'candidate linkage', 'low-risk rules', 'CJ access'],
+      outputs: ['manual review decision', 'CJ order placement', 'fulfillment job state'],
+      hardValidators: ['idempotency key present', 'candidate/draft/order linkage valid', 'CJ placement success'],
+      softValidators: ['manual review warning when low-risk rules fail'],
+      handoffTargets: ['manager'],
+      fallbackBehavior: 'Downgrade to manual review whenever CJ access or low-risk validation is not satisfied.',
+      refinementBehavior: 'Retry after address, stock, or linkage correction.',
+      blockingFailureBehavior: 'Do not place order and mark fulfillment for review.',
+      optimizationNotes: ['Persist idempotency keys before any provider call'],
+    },
+    {
+      agentId: 'customer_support',
+      role: 'Drafts safe informational support responses and escalates risky ones.',
+      inputs: ['support thread', 'order context', 'policy safety rules'],
+      outputs: ['reply draft', 'escalation state'],
+      hardValidators: ['no unsafe refund/return promise', 'no unsupported automated claim'],
+      softValidators: ['template fallback warning', 'draft-only downgrade warning'],
+      handoffTargets: ['manager'],
+      fallbackBehavior: 'Draft-only mode when ambiguity or policy sensitivity is detected.',
+      refinementBehavior: 'Request manual clarification and regenerate summary.',
+      blockingFailureBehavior: 'Block auto-send and escalate thread.',
+      optimizationNotes: ['Reuse safe informational templates for shipment/status updates'],
+    },
+    {
+      agentId: 'supplier_liaison',
+      role: 'Coordinates supplier follow-ups, commitments, and issue status.',
+      inputs: ['supplier thread', 'owner follow-up', 'reply ETA policy'],
+      outputs: ['thread update', 'supplier acknowledgment', 'issue status'],
+      hardValidators: ['thread exists'],
+      softValidators: ['reply ETA exceeded warning', 'simulated reply warning'],
+      handoffTargets: ['manager'],
+      fallbackBehavior: 'Use simulated internal acknowledgment until live supplier chat hooks exist.',
+      refinementBehavior: 'Trigger another follow-up after ETA threshold.',
+      blockingFailureBehavior: 'Escalate unresolved supplier issues to manager.',
+      optimizationNotes: ['Collapse duplicate follow-ups into a single thread action'],
+    },
+    {
+      agentId: 'manager',
+      role: 'Explains system state, recommends actions, and manages controls.',
+      inputs: ['cross-agent traces', 'alerts', 'chat prompts', 'budget state'],
+      outputs: ['narrative summary', 'advisory recommendation', 'control action'],
+      hardValidators: ['linked traces present when recommendation is produced'],
+      softValidators: ['provider/model provenance', 'system fallback warning'],
+      handoffTargets: ['owner'],
+      fallbackBehavior: 'Use system narrative when AI providers are unavailable.',
+      refinementBehavior: 'Regenerate summary with updated state or escalations.',
+      blockingFailureBehavior: 'Never blocks pipeline directly; raises alert instead.',
+      optimizationNotes: ['Prefer concise summaries and reuse latest state snapshot'],
+    },
+  ];
+}
+
+function createMessage(sender: ConversationMessage['sender'], direction: ConversationMessage['direction'], message: string, provider?: ProviderName, modelName?: string | null): ConversationMessage {
+  return {
+    id: createId('msg'),
+    sender,
+    direction,
+    message,
+    createdAt: nowIso(),
+    provider,
+    modelName: modelName ?? null,
+    linkedExecutionId: null,
+  };
+}
+
+function createDefaultSupplierChats(): SupplierConversation[] {
+  return [
+    {
+      id: createId('supplier'),
+      supplierName: 'CJ US Home Utility Hub',
+      supplierRegion: 'California, US',
+      sellerSku: 'YZG-PENDING',
+      productTitle: 'US Warehouse Candidate Pool',
+      status: 'online',
+      topic: 'Stock commitment for fast-moving utility SKUs',
+      lastMessage: 'We can hold same-day dispatch inventory once your weekly volume stabilizes.',
+      lastMessageAt: nowIso(),
+      responseEtaHours: 2,
+      messages: [
+        createMessage('supplier', 'inbound', 'We can hold same-day dispatch inventory once your weekly volume stabilizes.', 'cj', null),
+        createMessage('agent', 'internal', 'Supplier Liaison Agent marked this thread as ready for a volume follow-up.', 'system', null),
+      ],
+      linkedExecutionIds: [],
+    },
+    {
+      id: createId('supplier'),
+      supplierName: 'CJ Personal Care Warehouse',
+      supplierRegion: 'New Jersey, US',
+      sellerSku: 'YZG-PENDING',
+      productTitle: 'Beauty / Personal Care shortlist',
+      status: 'awaiting_reply',
+      topic: 'Confirm packaging, lot consistency, and 5-day delivery SLA',
+      lastMessage: 'Awaiting reply on packaging photos and replacement handling.',
+      lastMessageAt: nowIso(),
+      responseEtaHours: 6,
+      messages: [
+        createMessage('owner', 'outbound', 'Please confirm packaging photos, lot consistency, and replacement handling for US dispatch.'),
+        createMessage('agent', 'internal', 'Supplier Liaison Agent is watching this thread and will surface delays.', 'system', null),
+      ],
+      linkedExecutionIds: [],
+    },
+  ];
+}
+
+function createDefaultCustomerChats(): ImportedCustomerConversation[] {
+  return [];
+}
+
+function createDefaultCeoChat(): CeoChatThread {
+  return {
+    scope: 'last_90_days',
+    messages: [
+      createMessage('system', 'internal', 'CEO Chat is active. Before eBay is connected, this view explains internal operations, simulated market steps, and readiness blockers.', 'system', null),
+      createMessage('ceo', 'outbound', 'Focus on visibility first: watch discovery, review supplier commitments, and confirm AI/provider routing before enabling auto-publish.', 'system', null),
+    ],
+  };
+}
+
 export function createDefaultState(config: RuntimeConfig): AppState {
   return {
     settings: createDefaultSettings(),
@@ -98,6 +401,15 @@ export function createDefaultState(config: RuntimeConfig): AppState {
     deadLetters: [],
     alerts: createDefaultAlerts(config),
     supportThreads: [],
+    supplierChats: createDefaultSupplierChats(),
+    customerChats: createDefaultCustomerChats(),
+    ceoChat: createDefaultCeoChat(),
+    importedListings: [],
+    importedOrders: [],
+    agentDefinitions: createDefaultAgentDefinitions(),
+    agentContracts: createDefaultAgentContracts(),
+    agentExecutions: [],
+    validationRuns: [],
     agentRuns: [],
     auditLogs: [],
     aiCache: [],
@@ -453,4 +765,145 @@ export function pushRun(state: AppState, jobType: AgentRun['jobType'], status: A
   });
   state.agentRuns = state.agentRuns.slice(0, 40);
   return state;
+}
+
+export function startExecution(
+  state: AppState,
+  agentId: AgentId,
+  triggerSource: string,
+  options?: {
+    parentJobId?: string | null;
+    linkedResourceType?: string | null;
+    linkedResourceId?: string | null;
+    summary?: string;
+  },
+): AgentExecution {
+  const execution: AgentExecution = {
+    id: createId('exec'),
+    agentId,
+    status: 'running',
+    triggerSource,
+    parentJobId: options?.parentJobId ?? null,
+    startedAt: nowIso(),
+    finishedAt: null,
+    summary: options?.summary ?? '',
+    linkedResourceType: options?.linkedResourceType ?? null,
+    linkedResourceId: options?.linkedResourceId ?? null,
+    validationRunIds: [],
+    steps: [],
+  };
+  state.agentExecutions.unshift(execution);
+  state.agentExecutions = state.agentExecutions.slice(0, 160);
+  return execution;
+}
+
+export function pushExecutionStep(
+  state: AppState,
+  executionId: string,
+  step: Omit<AgentExecutionStep, 'id' | 'executionId' | 'createdAt'>,
+): AgentExecutionStep | null {
+  const execution = state.agentExecutions.find((item) => item.id === executionId);
+  if (!execution) {
+    return null;
+  }
+  const created: AgentExecutionStep = {
+    id: createId('step'),
+    executionId,
+    createdAt: nowIso(),
+    ...step,
+  };
+  execution.steps.push(created);
+  return created;
+}
+
+export function finishExecution(state: AppState, executionId: string, status: AgentExecution['status'], summary: string): AgentExecution | null {
+  const execution = state.agentExecutions.find((item) => item.id === executionId);
+  if (!execution) {
+    return null;
+  }
+  execution.status = status;
+  execution.summary = summary;
+  execution.finishedAt = nowIso();
+  return execution;
+}
+
+function attachValidationToResource(state: AppState, resourceType: string, resourceId: string, validationId: string): void {
+  const attach = (target?: { linkedValidationIds?: string[] } | null) => {
+    if (!target) {
+      return;
+    }
+    if (!target.linkedValidationIds) {
+      target.linkedValidationIds = [];
+    }
+    if (!target.linkedValidationIds.includes(validationId)) {
+      target.linkedValidationIds.push(validationId);
+    }
+  };
+
+  switch (resourceType) {
+    case 'candidate':
+      attach(state.candidates.find((item) => item.id === resourceId));
+      return;
+    case 'draft':
+      attach(state.listingDrafts.find((item) => item.id === resourceId));
+      return;
+    case 'order':
+      attach(state.orders.find((item) => item.id === resourceId));
+      return;
+    case 'fulfillment':
+      attach(state.fulfillmentJobs.find((item) => item.id === resourceId));
+      return;
+    case 'supplier_chat':
+      attach(state.supplierChats.find((item) => item.id === resourceId));
+      return;
+    case 'customer_chat':
+      attach(state.customerChats.find((item) => item.id === resourceId));
+      return;
+    default:
+      return;
+  }
+}
+
+export function pushValidationRun(state: AppState, run: ValidationRun): ValidationRun {
+  state.validationRuns.unshift(run);
+  state.validationRuns = state.validationRuns.slice(0, 240);
+  const execution = state.agentExecutions.find((item) => item.id === run.executionId);
+  if (execution && !execution.validationRunIds.includes(run.id)) {
+    execution.validationRunIds.push(run.id);
+  }
+  attachValidationToResource(state, run.resourceType, run.resourceId, run.id);
+  return run;
+}
+
+export function appendConversationMessage(messages: ConversationMessage[], message: ConversationMessage): ConversationMessage[] {
+  messages.push(message);
+  return messages;
+}
+
+export function appendSupplierMessage(
+  state: AppState,
+  chatId: string,
+  message: ConversationMessage,
+  nextStatus?: SupplierConversation['status'],
+  responseEtaHours?: number,
+): SupplierConversation | null {
+  const chat = state.supplierChats.find((item) => item.id === chatId);
+  if (!chat) {
+    return null;
+  }
+  appendConversationMessage(chat.messages, message);
+  chat.lastMessage = message.message;
+  chat.lastMessageAt = message.createdAt;
+  if (nextStatus) {
+    chat.status = nextStatus;
+  }
+  if (typeof responseEtaHours === 'number') {
+    chat.responseEtaHours = responseEtaHours;
+  }
+  return chat;
+}
+
+export function appendCeoMessage(state: AppState, message: ConversationMessage): void {
+  state.ceoChat.messages.push(message);
+  state.ceoChat.messages = state.ceoChat.messages.slice(-40);
 }

@@ -2,9 +2,11 @@ import {
   AIArtifactCacheEntry,
   AppState,
   CJProduct,
+  ConversationMessage,
   ListingPack,
   MarketSearchSnapshot,
   ProductCandidate,
+  ProviderName,
   RuntimeConfig,
 } from '../types';
 import { clamp, createId, daysFromNow, median, normalizeKeyword, nowIso, round, shortHash } from './utils';
@@ -320,6 +322,16 @@ function mapCategoryId(categoryPath: string): string {
 export class AIClient {
   constructor(private readonly config: RuntimeConfig) {}
 
+  private providerDetails(provider: ProviderName): { provider: ProviderName; modelName: string | null } {
+    if (provider === 'deepseek') {
+      return { provider, modelName: this.config.ai.deepseekModel };
+    }
+    if (provider === 'gemini') {
+      return { provider, modelName: this.config.ai.geminiModel };
+    }
+    return { provider: 'system', modelName: null };
+  }
+
   canSpend(state: AppState): boolean {
     const budgets = state.budgets;
     const month = nowIso().slice(0, 7);
@@ -349,10 +361,20 @@ export class AIClient {
     return state.aiCache.find((entry) => entry.productFingerprint === productFingerprint && entry.kind === kind && new Date(entry.expiresAt).getTime() > now) || null;
   }
 
-  async generateListingPack(state: AppState, productFingerprint: string, candidate: ProductCandidate): Promise<ListingPack> {
+  async generateListingPack(
+    state: AppState,
+    productFingerprint: string,
+    candidate: ProductCandidate,
+  ): Promise<{ pack: ListingPack; provider: ProviderName; modelName: string | null; cacheHit: boolean; fallback: boolean }> {
     const cached = this.findCache(state, productFingerprint, 'listing_pack');
     if (cached) {
-      return JSON.parse(cached.payload) as ListingPack;
+      return {
+        pack: JSON.parse(cached.payload) as ListingPack,
+        provider: cached.provider,
+        modelName: this.providerDetails(cached.provider).modelName,
+        cacheHit: true,
+        fallback: cached.provider === 'system',
+      };
     }
 
     let pack: ListingPack;
@@ -379,7 +401,60 @@ export class AIClient {
       createdAt: nowIso(),
     });
     state.aiCache = state.aiCache.slice(0, 200);
-    return pack;
+    return {
+      pack,
+      provider,
+      modelName: this.providerDetails(provider).modelName,
+      cacheHit: false,
+      fallback: provider === 'system',
+    };
+  }
+
+  async generateCeoReply(
+    state: AppState,
+    prompt: string,
+  ): Promise<{ message: ConversationMessage; fallback: boolean }> {
+    let provider: ProviderName = 'system';
+    let modelName: string | null = null;
+    let content = '';
+
+    if (this.canSpend(state) && this.config.ai.deepseekApiKey) {
+      provider = 'deepseek';
+      modelName = this.config.ai.deepseekModel;
+      content = await this.generateShortReplyViaDeepSeek(prompt);
+      if (content) {
+        this.charge(state, 0.02);
+      }
+    }
+
+    if (!content && this.canSpend(state) && this.config.ai.geminiApiKey) {
+      provider = 'gemini';
+      modelName = this.config.ai.geminiModel;
+      content = await this.generateShortReplyViaGemini(prompt);
+      if (content) {
+        this.charge(state, 0.03);
+      }
+    }
+
+    if (!content) {
+      provider = 'system';
+      modelName = null;
+      content = `Manager summary: ${prompt}. Current mode remains visibility-first. Review the latest agent traces before enabling wider automation.`;
+    }
+
+    return {
+      message: {
+        id: createId('msg'),
+        sender: 'ceo',
+        direction: 'outbound',
+        message: content,
+        createdAt: nowIso(),
+        provider,
+        modelName,
+        linkedExecutionId: null,
+      },
+      fallback: provider === 'system',
+    };
   }
 
   private async generateViaDeepSeek(candidate: ProductCandidate): Promise<ListingPack> {
@@ -449,6 +524,61 @@ export class AIClient {
       return JSON.parse(text) as ListingPack;
     } catch {
       return templateListingPack(candidate);
+    }
+  }
+
+  private async generateShortReplyViaDeepSeek(prompt: string): Promise<string> {
+    try {
+      const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.config.ai.deepseekApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: this.config.ai.deepseekModel,
+          messages: [
+            {
+              role: 'system',
+              content: 'You are a concise ecommerce operations manager. Reply in 2-4 short sentences.',
+            },
+            {
+              role: 'user',
+              content: prompt,
+            },
+          ],
+        }),
+      });
+      if (!response.ok) {
+        return '';
+      }
+      const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      return payload.choices?.[0]?.message?.content?.trim() || '';
+    } catch {
+      return '';
+    }
+  }
+
+  private async generateShortReplyViaGemini(prompt: string): Promise<string> {
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.config.ai.geminiModel}:generateContent?key=${this.config.ai.geminiApiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [{ text: `Reply in 2-4 short sentences as an ecommerce ops manager. Prompt: ${prompt}` }],
+            },
+          ],
+        }),
+      });
+      if (!response.ok) {
+        return '';
+      }
+      const payload = (await response.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+      return payload.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+    } catch {
+      return '';
     }
   }
 }
